@@ -1,0 +1,67 @@
+name: Build Dopamine Rootful IPA
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-13
+    strategy:
+      matrix:
+        xcode: ['15.2']
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+    
+    - name: Install THEOS
+      run: |
+        export THEOS=~/theos
+        git clone --recursive https://github.com/theos/theos.git $THEOS
+        echo "THEOS=$THEOS" >> $GITHUB_ENV
+        echo "$THEOS/bin" >> $GITHUB_PATH
+    
+    - name: Install dependencies
+      run: |
+        brew install ldid xz
+        brew install --cask docker
+    
+    - name: Build BaseBin
+      run: |
+        cd BaseBin
+        make
+    
+    - name: Download bootstraps
+      run: |
+        cd Application/Dopamine/Resources
+        chmod +x download_bootstraps.sh
+        ./download_bootstraps.sh
+    
+    - name: Build Packages
+      run: |
+        cd Packages
+        make
+    
+    - name: Build Dopamine app
+      run: |
+        cd Application/Dopamine
+        xcodebuild -scheme Dopamine -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+    
+    - name: Create IPA
+      run: |
+        cd Application/Dopamine/build/Release-iphoneos
+        mkdir -p Payload
+        cp -R Dopamine.app Payload/
+        zip -r Dopamine_Rootful.ipa Payload
+    
+    - name: Upload IPA
+      uses: actions/upload-artifact@v3
+      with:
+        name: Dopamine_Rootful.ipa
+        path: Application/Dopamine/build/Release-iphoneos/Dopamine_Rootful.ipa
+        
