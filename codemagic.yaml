@@ -91,7 +91,6 @@ workflows:
           cd "$CM_BUILD_DIR/BaseBin"
           echo "开始构建BaseBin..."
 
-          # 先执行完整的构建（允许子项目错误继续）
           make FINALPACKAGE=1 \
             THEOS="$THEOS" \
             THEOS_IPHONEOS_SDK="$SDK" \
@@ -101,7 +100,6 @@ workflows:
 
           echo "开始修复所有子项目的产物路径..."
 
-          # 定义一个函数：修复单个子项目的 cp 路径
           fix_subproject() {
             local SUB_DIR="$1"
             local SUB_NAME="$2"
@@ -122,7 +120,6 @@ workflows:
             cp -v "$ACTUAL_BIN" "$FULL_DIR/$SUB_NAME" 2>/dev/null || true
           }
 
-          # 修复已知的子项目
           fix_subproject "bootstrapfs" "bootstrapfs"
           fix_subproject "makerw" "makerw"
           fix_subproject "opainject" "opainject"
@@ -140,7 +137,6 @@ workflows:
 
           echo "子项目产物修复完成。"
 
-          # 尝试生成 basebin.tar 和 basebin.tc，如果失败则手动创建
           echo "尝试生成 basebin.tar 和 basebin.tc..."
           make basebin.tar basebin.tc FINALPACKAGE=1 \
             THEOS="$THEOS" \
@@ -148,21 +144,18 @@ workflows:
             IPHONEOS_SYSROOT="$SDK" \
             SYSROOT="$SDK" 2>&1 || true
 
-          # 手动创建 basebin.tar（如果不存在）
           if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tar" ]; then
             echo "手动创建 basebin.tar..."
             cd "$CM_BUILD_DIR/BaseBin"
-            # 检查 .build 目录是否存在且有内容
             if [ -d ".build" ] && [ "$(ls -A .build)" ]; then
               tar -cf basebin.tar .build
-              echo "basebin.tar 创建成功（大小：$(ls -lh basebin.tar | awk '{print $5}')）"
+              echo "basebin.tar 创建成功"
             else
               echo "错误：.build 目录为空或不存在，无法创建 basebin.tar"
               exit 1
             fi
           fi
 
-          # 手动创建 basebin.tc（如果不存在）
           if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tc" ]; then
             echo "手动创建 basebin.tc（空文件）..."
             touch "$CM_BUILD_DIR/BaseBin/basebin.tc"
@@ -219,10 +212,14 @@ workflows:
           xcodebuild -list -project "$PROJECT_FILE" 2>/dev/null || xcodebuild -list -workspace "$PROJECT_FILE" 2>/dev/null || true
           SCHEME_NAME=$(basename "$PROJECT_FILE" | sed 's/\.xcodeproj//;s/\.xcworkspace//')
           echo "尝试使用 Scheme: $SCHEME_NAME"
+
+          # 指定 derivedDataPath 到已知目录
+          DERIVED_DATA="$CM_BUILD_DIR/build"
           xcodebuild \
             -scheme "$SCHEME_NAME" \
             -configuration Release \
             -sdk iphoneos \
+            -derivedDataPath "$DERIVED_DATA" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -231,9 +228,11 @@ workflows:
       - name: 09 - 打包为IPA
         script: |
           set -x
-          APP_PATH=$(find "$CM_BUILD_DIR" -maxdepth 5 -name "Dopamine.app" -type d 2>/dev/null | head -1)
+          # 搜索构建产物（现在在 $CM_BUILD_DIR/build 下）
+          APP_PATH=$(find "$CM_BUILD_DIR/build" -maxdepth 5 -name "Dopamine.app" -type d 2>/dev/null | head -1)
           if [ -z "$APP_PATH" ]; then
             echo "错误：未找到 Dopamine.app 构建产物"
+            echo "搜索所有 .app 文件："
             find "$CM_BUILD_DIR" -name "*.app" -type d 2>/dev/null || true
             exit 1
           fi
