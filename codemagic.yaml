@@ -4,11 +4,17 @@ workflows:
     max_build_duration: 120
 
     environment:
-      xcode: "15.2"
+      xcode: latest
       vars:
         THEOS: "/Users/builder/clone/theos"
 
     scripts:
+      - name: Debug Xcode info
+        script: |
+          xcode-select -p
+          xcodebuild -showsdks
+          ls /Applications/ | grep Xcode
+
       - name: Install THEOS
         script: |
           export THEOS="$CM_BUILD_DIR/theos"
@@ -17,27 +23,27 @@ workflows:
 
       - name: Install dependencies
         script: |
-          brew install ldid xz
+          brew install ldid xz || true
 
       - name: Build BaseBin
         script: |
-          cd BaseBin
+          cd $CM_BUILD_DIR/BaseBin
           make
 
       - name: Download bootstraps
         script: |
-          cd Application/Dopamine/Resources
+          cd $CM_BUILD_DIR/Application/Dopamine/Resources
           chmod +x download_bootstraps.sh
           ./download_bootstraps.sh
 
       - name: Build Packages
         script: |
-          cd Packages
+          cd $CM_BUILD_DIR/Packages
           make
 
       - name: Build Dopamine app
         script: |
-          cd Application/Dopamine
+          cd $CM_BUILD_DIR/Application/Dopamine
           xcodebuild \
             -scheme Dopamine \
             -configuration Release \
@@ -48,7 +54,7 @@ workflows:
 
       - name: Create IPA
         script: |
-          cd Application/Dopamine/build/Release-iphoneos
+          cd $CM_BUILD_DIR/Application/Dopamine/build/Release-iphoneos
           mkdir -p Payload
           cp -R Dopamine.app Payload/
           zip -r Dopamine_Rootful.ipa Payload
