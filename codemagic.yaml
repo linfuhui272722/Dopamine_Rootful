@@ -27,20 +27,11 @@ workflows:
       - name: 02 - 安装系统依赖
         script: |
           set -x
-          # 临时禁用Homebrew的tap信任检查，避免警告干扰
           export HOMEBREW_NO_REQUIRE_TAP_TRUST=1
-          
-          echo "安装基础工具..."
           brew install ldid xz libarchive
-          
-          echo "安装新版GNU Make..."
           brew install make
-          
-          # 关键：将新版make所在目录加入PATH，并持久化
           export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
           echo "PATH=$PATH" >> $CM_ENV
-          
-          echo "验证工具安装:"
           which ldid
           which xz
           which make
@@ -52,31 +43,20 @@ workflows:
           set -x
           export THEOS="$CM_BUILD_DIR/theos"
           echo "THEOS=$THEOS" >> $CM_ENV
-          
           if [ ! -d "$THEOS" ]; then
             git clone --recursive https://github.com/theos/theos.git "$THEOS"
-            echo "THEOS克隆完成。"
-          else
-            echo "THEOS已存在，跳过克隆。"
           fi
-          
-          # 应用PATH设置
           export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
-          which make
-          make --version
 
       - name: 04 - 应用Xcode 26+兼容性补丁
         script: |
           set -x
-          echo "开始应用Xcode 26.4+兼容性补丁..."
-          
-          # 1. 修补opainject：移除CoreSymbolication
+          echo "开始应用补丁..."
           OPA_DIR="$CM_BUILD_DIR/BaseBin/opainject"
           if [ -d "$OPA_DIR" ]; then
             OPA_MK="$OPA_DIR/Makefile"
             if [ -f "$OPA_MK" ]; then
               sed -i '' '/[Cc]ore[Ss]ymbolication/d' "$OPA_MK"
-              echo "已修补opainject/Makefile"
             fi
             for SRC in "$OPA_DIR"/*.m "$OPA_DIR"/*.mm "$OPA_DIR"/*.c "$OPA_DIR"/*.h; do
               [ -f "$SRC" ] || continue
@@ -85,98 +65,67 @@ workflows:
               fi
             done
           fi
-          
-          # 2. 修补arm64.h：添加缺失头文件
           for HEADER in "$CM_BUILD_DIR/BaseBin/arm64.h" "$CM_BUILD_DIR/BaseBin/opainject/arm64.h"; do
             [ -f "$HEADER" ] || continue
             if ! grep -q '^#include <stdint.h>' "$HEADER"; then
               sed -i '' '1s|^|#include <stdint.h>\n#include <stdbool.h>\n|' "$HEADER"
-              echo "已修补 $HEADER"
             fi
           done
-          
-          # 3. 关键修补：修正bootstrapfs
           BOOT_MK="$CM_BUILD_DIR/BaseBin/bootstrapfs/Makefile"
           if [ -f "$BOOT_MK" ]; then
-            # 提升部署目标至iOS 14.0
             sed -i '' '/^TARGET[[:space:]]*:=/d' "$BOOT_MK"
             sed -i '' '1s|^|TARGET := iphone:clang:14.0:14.0\n\n|' "$BOOT_MK"
-            echo "已设置bootstrapfs TARGET=14.0"
-            
-            # 修正cp命令中的debug路径为release
             if grep -q '\.theos/obj/debug/' "$BOOT_MK"; then
               sed -i '' 's|\.theos/obj/debug/|.theos/obj/release/|g' "$BOOT_MK"
-              echo "已修正bootstrapfs cp路径 (debug->release)"
             fi
           fi
-          echo "所有兼容性补丁应用完成。"
+          echo "兼容性补丁应用完成。"
 
-       - name: 05 - 构建BaseBin
+      - name: 05 - 构建BaseBin
         script: |
           set -x
           source $CM_ENV
           export SDK=$(xcrun --show-sdk-path --sdk iphoneos)
           export SYSROOT="$SDK"
-          
           cd "$CM_BUILD_DIR/BaseBin"
           echo "开始构建BaseBin..."
-          
-          # 1. 执行构建
           make FINALPACKAGE=1 \
             THEOS="$THEOS" \
             THEOS_IPHONEOS_SDK="$SDK" \
             IPHONEOS_SYSROOT="$SDK" \
             SYSROOT="$SDK"
-          
-          # 2. 关键修复：确保bootstrapfs产物在Makefile期望的所有位置都存在
           echo "开始修复bootstrapfs产物路径..."
           BOOT_DIR="$CM_BUILD_DIR/BaseBin/bootstrapfs"
-          
-          # 首先，查找构建实际生成的二进制文件（无论它在哪个子目录）
           BUILT_BINARY=$(find "$BOOT_DIR/.theos/obj" -name "bootstrapfs" -type f 2>/dev/null | head -1)
-          
           if [ -z "$BUILT_BINARY" ] || [ ! -f "$BUILT_BINARY" ]; then
-            echo "错误：在 $BOOT_DIR/.theos/obj 目录下未找到已构建的 bootstrapfs 可执行文件。"
-            echo "目录内容如下："
+            echo "错误：未找到已构建的 bootstrapfs 可执行文件。"
             find "$BOOT_DIR/.theos" -type f 2>/dev/null || true
             exit 1
           fi
-          
           echo "找到构建产物: $BUILT_BINARY"
           ls -lh "$BUILT_BINARY"
-          
-          # 3. 将文件复制到Makefile可能引用的所有关键位置
-          # 3a) 复制到 .theos/obj/debug/ (原始Makefile错误期望的位置)
           mkdir -p "$BOOT_DIR/.theos/obj/debug"
           cp -v "$BUILT_BINARY" "$BOOT_DIR/.theos/obj/debug/bootstrapfs"
-          
-          # 3b) 复制到 .theos/obj/release/ (FINALPACKAGE=1 时常见的位置)
           mkdir -p "$BOOT_DIR/.theos/obj/release"
           cp -v "$BUILT_BINARY" "$BOOT_DIR/.theos/obj/release/bootstrapfs"
-          
-          # 3c) 复制到项目根目录（某些脚本可能期望的位置）
           cp -v "$BUILT_BINARY" "$BOOT_DIR/bootstrapfs"
-          
-          # 4. 验证所有目标文件都已就位
           echo "验证复制结果："
           TARGET_PATHS=(
             "$BOOT_DIR/.theos/obj/debug/bootstrapfs"
             "$BOOT_DIR/.theos/obj/release/bootstrapfs"
             "$BOOT_DIR/bootstrapfs"
           )
-          
           ALL_OK=true
           for TARGET in "${TARGET_PATHS[@]}"; do
             if [ -f "$TARGET" ] && [ -x "$TARGET" ]; then
               echo "  ✓ 就位: $TARGET"
             else
-              echo "  ✗ 缺失或不可执行: $TARGET"
+              echo "  ✗ 缺失: $TARGET"
               ALL_OK=false
             fi
           done
-          
           if [ "$ALL_OK" = true ]; then
-            echo "所有bootstrapfs文件已成功就位，BaseBin构建步骤完成。"
+            echo "所有bootstrapfs文件已成功就位。"
           else
             echo "错误：部分bootstrapfs文件复制失败。"
             exit 1
@@ -190,9 +139,6 @@ workflows:
             cd "$RES_DIR"
             chmod +x download_bootstraps.sh
             ./download_bootstraps.sh
-            echo "Bootstraps下载完成。"
-          else
-            echo "跳过：未找到download_bootstraps.sh"
           fi
 
       - name: 07 - 构建Packages
@@ -201,9 +147,6 @@ workflows:
           if [ -d "$CM_BUILD_DIR/Packages" ]; then
             cd "$CM_BUILD_DIR/Packages"
             make
-            echo "Packages构建完成。"
-          else
-            echo "跳过：未找到Packages目录"
           fi
 
       - name: 08 - 编译Dopamine应用
@@ -211,15 +154,11 @@ workflows:
           set -x
           PROJ_DIR="$CM_BUILD_DIR/Application/Dopamine"
           [ -d "$PROJ_DIR" ] || PROJ_DIR="$CM_BUILD_DIR/Dopamine"
-          
           if [ ! -d "$PROJ_DIR" ]; then
             echo "错误：找不到Xcode项目目录"
             exit 1
           fi
-          
           cd "$PROJ_DIR"
-          echo "构建Dopamine应用..."
-          
           xcodebuild \
             -scheme Dopamine \
             -configuration Release \
@@ -228,29 +167,23 @@ workflows:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM=""
-          
-          echo "Dopamine.app编译完成。"
 
       - name: 09 - 打包为IPA
         script: |
           set -x
           APP_PATH="$CM_BUILD_DIR/Application/Dopamine/build/Release-iphoneos/Dopamine.app"
           if [ ! -d "$APP_PATH" ]; then
-            echo "错误：未找到Dopamine.app"
             find "$CM_BUILD_DIR" -name "*.app" -type d 2>/dev/null
             exit 1
           fi
-          
           IPA_DIR="$CM_BUILD_DIR/ipa_output"
           mkdir -p "$IPA_DIR"
           cd "$IPA_DIR"
-          
           rm -rf Payload
           mkdir Payload
           cp -R "$APP_PATH" Payload/
           zip -qr "Dopamine_Rootful.ipa" Payload
-          
-          echo "✓ IPA创建成功: $IPA_DIR/Dopamine_Rootful.ipa"
+          echo "IPA创建成功:"
           ls -lh "$IPA_DIR/Dopamine_Rootful.ipa"
 
     artifacts:
