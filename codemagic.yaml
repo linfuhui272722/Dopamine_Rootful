@@ -1,63 +1,46 @@
-workflows:
-  build-dopamine-rootful:
-    name: Build Dopamine Rootful IPA
-    max_build_duration: 120
+scripts:
+  - name: Point xcode-select & detect REAL iPhoneOS SDK
+    script: |
+      # 让命令行工具绑定到当前 Xcode
+      sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null \
+      || sudo xcode-select -s "$(ls -d /Applications/Xcode-*.app | head -1)/Contents/Developer"
+      xcode-select -p
+      xcodebuild -showsdks
 
-    environment:
-      xcode: latest
-      vars:
-        THEOS: "/Users/builder/clone/theos"
+      # 找到真实 iPhoneOS SDK 路径（你要的那个 16.5 不存在，就用真实的）
+      IPHONEOS_SDK=$(xcrun --show-sdk-path --sdk iphoneos)
+      echo "→ detected iphoneos sysroot: $IPHONEOS_SDK"
 
-    scripts:
-      - name: Debug Xcode info
-        script: |
-          xcode-select -p
-          xcodebuild -showsdks
-          ls /Applications/ | grep Xcode
+      # 导出给后续 make/Theos 用
+      echo "THEOS_IPHONEOS_SDK=$IPHONEOS_SDK" >> $CM_ENV
+      echo "IPHONEOS_SYSROOT=$IPHONEOS_SDK" >> $CM_ENV
+      echo "SYSROOT=$IPHONEOS_SDK" >> $CM_ENV
 
-      - name: Install THEOS
-        script: |
-          export THEOS="$CM_BUILD_DIR/theos"
-          git clone --recursive https://github.com/theos/theos.git $THEOS
-          echo "THEOS=$THEOS" >> $CM_ENV
+  - name: Install THEOS
+    script: |
+      export THEOS="$CM_BUILD_DIR/theos"
+      git clone --recursive https://github.com/theos/theos.git $THEOS
+      echo "THEOS=$THEOS" >> $CM_ENV
 
-      - name: Install dependencies
-        script: |
-          brew install ldid xz || true
+  - name: Install dependencies
+    script: |
+      brew install ldid xz || true
 
-      - name: Build BaseBin
-        script: |
-          cd $CM_BUILD_DIR/BaseBin
-          make
+  - name: Build BaseBin (force correct SDK)
+    script: |
+      # 再把环境拉满
+      export THEOS="$CM_BUILD_DIR/theos"
+      export IPHONEOS_SYSROOT="$(xcrun --show-sdk-path --sdk iphoneos)"
+      export SYSROOT="$IPHONEOS_SYSROOT"
 
-      - name: Download bootstraps
-        script: |
-          cd $CM_BUILD_DIR/Application/Dopamine/Resources
-          chmod +x download_bootstraps.sh
-          ./download_bootstraps.sh
+      # 关键：很多 Makefile 里写死了 iPhoneOS16.5.sdk，这里用 SDKVERSION= 让 THEOS 重算
+      # 从路径里抠出版本号（例如 26.4 → 有些 Makefile 接受 26.4，有些要 16.x）
+      # 更“暴力但有效”的办法：直接告诉 make 用这个 sysroot 并跳过 old-style 16.5 probe
+      export SDKVERSION=""
+      export TARGET_COMPILER=clang
 
-      - name: Build Packages
-        script: |
-          cd $CM_BUILD_DIR/Packages
-          make
-
-      - name: Build Dopamine app
-        script: |
-          cd $CM_BUILD_DIR/Application/Dopamine
-          xcodebuild \
-            -scheme Dopamine \
-            -configuration Release \
-            -sdk iphoneos \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
-
-      - name: Create IPA
-        script: |
-          cd $CM_BUILD_DIR/Application/Dopamine/build/Release-iphoneos
-          mkdir -p Payload
-          cp -R Dopamine.app Payload/
-          zip -r Dopamine_Rootful.ipa Payload
-
-    artifacts:
-      - Application/Dopamine/build/Release-iphoneos/Dopamine_Rootful.ipa
+      cd BaseBin
+      make FINALPACKAGE=1 \
+        THEOS_IPHONEOS_SDK="$IPHONEOS_SYSROOT" \
+        IPHONEOS_SYSROOT="$IPHONEOS_SYSROOT" \
+        SYSROOT="$IPHONEOS_SYSROOT"
