@@ -1,135 +1,21 @@
-workflows:
-  build-dopamine-rootful:
-    name: Build Dopamine Rootful IPA
-    max_build_duration: 120
-
-    environment:
-      xcode: latest
-      vars:
-        THEOS: "/Users/builder/clone/theos"
-
-    scripts:
-
-      - name: Debug check env & SDK
-        script: |
-          set -x
-          echo "=== PWD ==="
-          pwd
-          echo "=== REPO ROOT LS ==="
-          ls -la
-          echo "=== XCODE-SELECT ==="
-          xcode-select -p || true
-          echo "=== IPHONEOS SDK PATH ==="
-          xcrun --show-sdk-path --sdk iphoneos || true
-          echo "=== XCODE VERSION ==="
-          xcodebuild -version || true
-
-      - name: Install THEOS
-        script: |
-          set -x
-          export THEOS="$CM_BUILD_DIR/theos"
-          echo "THEOS=$THEOS" >> $CM_ENV
-          if [ ! -d "$THEOS" ]; then
-            git clone --recursive https://github.com/theos/theos.git "$THEOS"
-          fi
-          ls "$THEOS"/sdks/ 2>/dev/null || echo "No sdks dir yet"
-
-      - name: Install deps (ldid / xz)
-        script: |
-          set -x
-          brew install ldid xz || true
-
-      - name: Patch BaseBin/opainject for Xcode 26+
-        script: |
-          set -x
-          OPA="$CM_BUILD_DIR/BaseBin/opainject"
-          [ -d "$OPA" ] || { echo "opainject dir not found, skip patch"; exit 0; }
-          MF="$OPA/Makefile"
-          if [ -f "$MF" ]; then
-            sed -i '' '/[Cc]ore[Ss]ymbolication/d' "$MF"
-          fi
-          for f in "$OPA"/*.m "$OPA"/*.mm "$OPA"/*.c "$OPA"/*.h; do
-            [ -f "$f" ] || continue
-            if grep -qE '#(import|include)[[:space:]]+[<"].*CoreSymbolication' "$f"; then
-              sed -i '' 's|^\([[:space:]]*#\(import\|include\)[[:space:]]*[<"].*CoreSymbolication.*\)|//PATCHED \1|g' "$f"
-            fi
-          done
-
-      - name: Build BaseBin
-        script: |
-          set -x
-          export THEOS="$CM_BUILD_DIR/theos"
-          export SDK=$(xcrun --show-sdk-path --sdk iphoneos)
-          export SYSROOT="$SDK"
-          cd BaseBin
-          # 补头文件
-          for h in arm64.h opainject/arm64.h; do
-            [ -f "$h" ] || continue
-            if ! grep -q '#include <stdint.h>' "$h"; then
-              sed -i '' '1s|^|#include <stdint.h>\n#include <stdbool.h>\n|' "$h"
-            fi
-          done
-          make FINALPACKAGE=1 \
-            THEOS="$THEOS" \
-            THEOS_IPHONEOS_SDK="$SDK" \
-            IPHONEOS_SYSROOT="$SDK" \
-            SYSROOT="$SDK" \
-            TARGET="iphone:clang:14.0:14.0" \
-            DO_NOT_WARN_MISSING_XCODE_VERSION=1
-
-      - name: Download bootstraps
-        script: |
-          set -x
-          RES="$CM_BUILD_DIR/Application/Dopamine/Resources"
-          if [ -f "$RES/download_bootstraps.sh" ]; then
-            cd "$RES"
-            chmod +x download_bootstraps.sh
-            ./download_bootstraps.sh
-          else
-            echo "WARNING: download_bootstraps.sh not found"
-          fi
-
-      - name: Build Packages
-        script: |
-          set -x
-          if [ -d "$CM_BUILD_DIR/Packages" ]; then
-            cd "$CM_BUILD_DIR/Packages"
-            make || echo "Packages make returned non-zero (non-fatal)"
-          else
-            echo "WARNING: Packages/ dir not found"
-          fi
-
-      - name: Build Dopamine app (unsigned)
-        script: |
-          set -x
-          DIR="$CM_BUILD_DIR/Application/Dopamine"
-          [ -d "$DIR" ] || DIR="$CM_BUILD_DIR/Dopamine"
-          cd "$DIR"
-          xcodebuild -list 2>/dev/null || true
-          xcodebuild \
-            -scheme Dopamine \
-            -configuration Release \
-            -sdk iphoneos \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
-
-      - name: Create IPA
-        script: |
-          set -x
-          BUILD_DIR="$CM_BUILD_DIR/Application/Dopamine/build/Release-iphoneos"
-          if [ ! -d "$BUILD_DIR/Dopamine.app" ]; then
-            find "$CM_BUILD_DIR/Application" -name "*.app" -type d 2>/dev/null
-            echo "ERROR: Dopamine.app not found at $BUILD_DIR"
-            exit 1
-          fi
-          cd "$BUILD_DIR"
-          rm -rf Payload
-          mkdir -p Payload
-          cp -R Dopamine.app Payload/
-          zip -r Dopamine_Rootful.ipa Payload
-          echo "IPA created: $(ls -lh Dopamine_Rootful.ipa)"
-
-    artifacts:
-      - Application/Dopamine/build/Release-iphoneos/Dopamine_Rootful.ipa
-      - Application/Dopamine/build/Release-iphoneos/Dopamine.app/**
+- name: Build BaseBin
+  script: |
+    set -x
+    export THEOS="$CM_BUILD_DIR/theos"
+    export SDK=$(xcrun --show-sdk-path --sdk iphoneos)
+    export SYSROOT="$SDK"
+    cd BaseBin
+    # 补头文件（arm64.h 可能缺少 stdint/stdbool）
+    for h in arm64.h opainject/arm64.h; do
+      [ -f "$h" ] || continue
+      if ! grep -q '#include <stdint.h>' "$h"; then
+        sed -i '' '1s|^|#include <stdint.h>\n#include <stdbool.h>\n|' "$h"
+      fi
+    done
+    # 不再传递 TARGET，避免干扰 Swift 构建
+    make FINALPACKAGE=1 \
+      THEOS="$THEOS" \
+      THEOS_IPHONEOS_SDK="$SDK" \
+      IPHONEOS_SYSROOT="$SDK" \
+      SYSROOT="$SDK" \
+      DO_NOT_WARN_MISSING_XCODE_VERSION=1
