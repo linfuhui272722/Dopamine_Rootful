@@ -9,7 +9,7 @@ workflows:
       xcode: latest
       # 定义环境变量，THEOS 路径会在后续脚本中动态确定
       vars:
-        THEOS: ""
+        THEOS: "/Users/builder/clone/theos"
 
     scripts:
       # 步骤 1: 环境检测与调试信息
