@@ -111,7 +111,7 @@ workflows:
           fi
           echo "所有兼容性补丁应用完成。"
 
-      - name: 05 - 构建BaseBin
+       - name: 05 - 构建BaseBin
         script: |
           set -x
           source $CM_ENV
@@ -121,35 +121,66 @@ workflows:
           cd "$CM_BUILD_DIR/BaseBin"
           echo "开始构建BaseBin..."
           
+          # 1. 执行构建
           make FINALPACKAGE=1 \
             THEOS="$THEOS" \
             THEOS_IPHONEOS_SDK="$SDK" \
             IPHONEOS_SYSROOT="$SDK" \
             SYSROOT="$SDK"
           
-          # 确保bootstrapfs文件到位
-          echo "验证bootstrapfs产物..."
+          # 2. 关键修复：确保bootstrapfs产物在Makefile期望的所有位置都存在
+          echo "开始修复bootstrapfs产物路径..."
           BOOT_DIR="$CM_BUILD_DIR/BaseBin/bootstrapfs"
-          if [ -f "$BOOT_DIR/.theos/obj/release/bootstrapfs" ]; then
-            ACTUAL_BIN="$BOOT_DIR/.theos/obj/release/bootstrapfs"
-          elif [ -f "$BOOT_DIR/.theos/obj/debug/bootstrapfs" ]; then
-            ACTUAL_BIN="$BOOT_DIR/.theos/obj/debug/bootstrapfs"
-          else
-            ACTUAL_BIN=$(find "$BOOT_DIR/.theos" -name "bootstrapfs" -type f 2>/dev/null | head -1)
-            [ -n "$ACTUAL_BIN" ] || { echo "错误：未找到bootstrapfs可执行文件"; exit 1; }
-          fi
           
-          EXPECTED_BIN="$CM_BUILD_DIR/BaseBin/bootstrapfs"
-          cp -f "$ACTUAL_BIN" "$EXPECTED_BIN"
+          # 首先，查找构建实际生成的二进制文件（无论它在哪个子目录）
+          BUILT_BINARY=$(find "$BOOT_DIR/.theos/obj" -name "bootstrapfs" -type f 2>/dev/null | head -1)
           
-          if [ -f "$EXPECTED_BIN" ] && [ -x "$EXPECTED_BIN" ]; then
-            echo "✓ bootstrapfs已就位"
-            ls -lh "$EXPECTED_BIN"
-          else
-            echo "✗ bootstrapfs复制失败"
+          if [ -z "$BUILT_BINARY" ] || [ ! -f "$BUILT_BINARY" ]; then
+            echo "错误：在 $BOOT_DIR/.theos/obj 目录下未找到已构建的 bootstrapfs 可执行文件。"
+            echo "目录内容如下："
+            find "$BOOT_DIR/.theos" -type f 2>/dev/null || true
             exit 1
           fi
-          echo "BaseBin构建成功。"
+          
+          echo "找到构建产物: $BUILT_BINARY"
+          ls -lh "$BUILT_BINARY"
+          
+          # 3. 将文件复制到Makefile可能引用的所有关键位置
+          # 3a) 复制到 .theos/obj/debug/ (原始Makefile错误期望的位置)
+          mkdir -p "$BOOT_DIR/.theos/obj/debug"
+          cp -v "$BUILT_BINARY" "$BOOT_DIR/.theos/obj/debug/bootstrapfs"
+          
+          # 3b) 复制到 .theos/obj/release/ (FINALPACKAGE=1 时常见的位置)
+          mkdir -p "$BOOT_DIR/.theos/obj/release"
+          cp -v "$BUILT_BINARY" "$BOOT_DIR/.theos/obj/release/bootstrapfs"
+          
+          # 3c) 复制到项目根目录（某些脚本可能期望的位置）
+          cp -v "$BUILT_BINARY" "$BOOT_DIR/bootstrapfs"
+          
+          # 4. 验证所有目标文件都已就位
+          echo "验证复制结果："
+          TARGET_PATHS=(
+            "$BOOT_DIR/.theos/obj/debug/bootstrapfs"
+            "$BOOT_DIR/.theos/obj/release/bootstrapfs"
+            "$BOOT_DIR/bootstrapfs"
+          )
+          
+          ALL_OK=true
+          for TARGET in "${TARGET_PATHS[@]}"; do
+            if [ -f "$TARGET" ] && [ -x "$TARGET" ]; then
+              echo "  ✓ 就位: $TARGET"
+            else
+              echo "  ✗ 缺失或不可执行: $TARGET"
+              ALL_OK=false
+            fi
+          done
+          
+          if [ "$ALL_OK" = true ]; then
+            echo "所有bootstrapfs文件已成功就位，BaseBin构建步骤完成。"
+          else
+            echo "错误：部分bootstrapfs文件复制失败。"
+            exit 1
+          fi
 
       - name: 06 - 下载Bootstraps
         script: |
