@@ -36,6 +36,7 @@ workflows:
           which xz
           which make
           make --version
+          which dpkg-deb
           find /opt/homebrew -name "archive.h" 2>/dev/null | head -1
 
       - name: 03 - 安装与配置THEOS
@@ -152,15 +153,23 @@ workflows:
       - name: 08 - 编译Dopamine应用
         script: |
           set -x
-          PROJ_DIR="$CM_BUILD_DIR/Application/Dopamine"
-          [ -d "$PROJ_DIR" ] || PROJ_DIR="$CM_BUILD_DIR/Dopamine"
-          if [ ! -d "$PROJ_DIR" ]; then
-            echo "错误：找不到Xcode项目目录"
+          PROJECT_FILE=$(find "$CM_BUILD_DIR" -maxdepth 3 -name "*.xcworkspace" -o -name "*.xcodeproj" 2>/dev/null | head -1)
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "错误：未找到任何 Xcode 项目文件 (.xcodeproj 或 .xcworkspace)"
+            echo "当前目录结构："
+            find "$CM_BUILD_DIR" -maxdepth 4 -name "*.xcodeproj" -o -name "*.xcworkspace" 2>/dev/null || true
             exit 1
           fi
-          cd "$PROJ_DIR"
+          echo "找到项目文件: $PROJECT_FILE"
+          PROJECT_DIR=$(dirname "$PROJECT_FILE")
+          cd "$PROJECT_DIR"
+          echo "工作目录: $(pwd)"
+          echo "可用的 Schemes:"
+          xcodebuild -list -project "$PROJECT_FILE" 2>/dev/null || xcodebuild -list -workspace "$PROJECT_FILE" 2>/dev/null || true
+          SCHEME_NAME=$(basename "$PROJECT_FILE" | sed 's/\.xcodeproj//;s/\.xcworkspace//')
+          echo "尝试使用 Scheme: $SCHEME_NAME"
           xcodebuild \
-            -scheme Dopamine \
+            -scheme "$SCHEME_NAME" \
             -configuration Release \
             -sdk iphoneos \
             CODE_SIGNING_ALLOWED=NO \
