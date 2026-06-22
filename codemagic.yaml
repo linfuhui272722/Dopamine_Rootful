@@ -38,11 +38,10 @@ workflows:
         script: |
           set -x
           brew install ldid xz libarchive || true
-          # 验证 libarchive 头文件
           if [ -f /opt/homebrew/opt/libarchive/include/archive.h ]; then
             echo "libarchive installed successfully"
           else
-            echo "WARNING: archive.h not found, trying alternative paths"
+            echo "WARNING: archive.h not found"
             find /opt/homebrew -name "archive.h" 2>/dev/null
           fi
 
@@ -69,6 +68,7 @@ workflows:
           export SDK=$(xcrun --show-sdk-path --sdk iphoneos)
           export SYSROOT="$SDK"
           cd BaseBin
+
           # 补头文件（arm64.h 可能缺少 stdint/stdbool）
           for h in arm64.h opainject/arm64.h; do
             [ -f "$h" ] || continue
@@ -76,7 +76,20 @@ workflows:
               sed -i '' '1s|^|#include <stdint.h>\n#include <stdbool.h>\n|' "$h"
             fi
           done
-          # 不再传递 TARGET，避免干扰 Swift 构建
+
+          # 单独提升 bootstrapfs 的部署目标至 14.0（解决 arm64e 兼容性）
+          BOOTSTRAP_MK="bootstrapfs/Makefile"
+          if [ -f "$BOOTSTRAP_MK" ]; then
+            # 在文件顶部添加 TARGET 定义（如果尚未存在）
+            if ! grep -q '^TARGET\s*:=' "$BOOTSTRAP_MK"; then
+              sed -i '' '1s/^/TARGET := iphone:clang:14.0:14.0\n/' "$BOOTSTRAP_MK"
+              echo "Patched bootstrapfs/Makefile: added TARGET=14.0"
+            else
+              echo "bootstrapfs/Makefile already has TARGET, skipping"
+            fi
+          fi
+
+          # 构建（不再传递全局 TARGET，避免影响 Swift 构建）
           make FINALPACKAGE=1 \
             THEOS="$THEOS" \
             THEOS_IPHONEOS_SDK="$SDK" \
