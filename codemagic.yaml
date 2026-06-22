@@ -1,20 +1,17 @@
 workflows:
   build-dopamine-rootful:
     name: Build Dopamine Rootful IPA
-    max_build_duration: 90
+    max_build_duration: 150
     environment:
       xcode: latest
       vars:
         THEOS: "/Users/builder/clone/theos"
     scripts:
-      - name: Point xcode-select & detect REAL iPhoneOS SDK
+      - name: Detect real iPhoneOS SDK
         script: |
-          # 让命令行工具绑定到当前 Xcode
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null \
-          || sudo xcode-select -s "$(ls -d /Applications/Xcode-*.app | head -1)/Contents/Developer"
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || \
+          sudo xcode-select -s "$(ls -d /Applications/Xcode-*.app | head -1)/Contents/Developer"
           xcode-select -p
-          xcodebuild -showsdks
-          # 获取真实 iPhoneOS SDK 路径
           IPHONEOS_SDK=$(xcrun --show-sdk-path --sdk iphoneos)
           echo "Real SDK path: $IPHONEOS_SDK"
           echo "THEOS_IPHONEOS_SDK=$IPHONEOS_SDK" >> $CM_ENV
@@ -30,6 +27,17 @@ workflows:
         script: |
           brew install ldid xz || true
 
+      - name: Patch opainject Makefile (remove CoreSymbolication)
+        script: |
+          MAKEFILE="$CM_BUILD_DIR/BaseBin/opainject/Makefile"
+          if [ -f "$MAKEFILE" ]; then
+            # Remove any line containing CoreSymbolication
+            sed -i '' '/CoreSymbolication/d' "$MAKEFILE"
+            echo "Removed CoreSymbolication references from opainject/Makefile"
+          else
+            echo "Warning: opainject/Makefile not found"
+          fi
+
       - name: Build BaseBin
         script: |
           export THEOS="$CM_BUILD_DIR/theos"
@@ -39,7 +47,8 @@ workflows:
           make FINALPACKAGE=1 \
             THEOS_IPHONEOS_SDK="$IPHONEOS_SDK" \
             IPHONEOS_SYSROOT="$IPHONEOS_SDK" \
-            SYSROOT="$IPHONEOS_SDK"
+            SYSROOT="$IPHONEOS_SDK" \
+            TARGET="iphone:clang:14.0:14.0"
 
       - name: Download bootstraps
         script: |
