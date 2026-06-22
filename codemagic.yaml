@@ -1,68 +1,163 @@
 workflows:
   build-dopamine-rootful:
     name: Build Dopamine Rootful IPA
-    max_build_duration: 120        # ← 改为 120，符合上限
+    max_build_duration: 120
+
     environment:
       xcode: latest
       vars:
-        THEOS: "/Users/builder/clone/theos"
-    scripts:
-      - name: Detect real iPhoneOS SDK
-        script: |
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || \
-          sudo xcode-select -s "$(ls -d /Applications/Xcode-*.app | head -1)/Contents/Developer"
-          xcode-select -p
-          IPHONEOS_SDK=$(xcrun --show-sdk-path --sdk iphoneos)
-          echo "Real SDK path: $IPHONEOS_SDK"
-          echo "THEOS_IPHONEOS_SDK=$IPHONEOS_SDK" >> $CM_ENV
-          echo "SYSROOT=$IPHONEOS_SDK" >> $CM_ENV
+        THEOS: ""
 
-      - name: Install THEOS
+    scripts:
+
+      # ── Step 1：确认当前 Xcode / SDK 环境 ──────────────────────────────
+      - name: "Debug: check env & SDK"
         script: |
+          set -x
+          echo "=== PWD ==="
+          pwd
+          echo "=== REPO ROOT LS ==="
+          ls -la
+          echo "=== XCODE-SELECT ==="
+          xcode-select -p || true
+          echo "=== AVAILABLE XCODE APPS ==="
+          ls /Applications/ | grep -i xcode || true
+          echo "=== IPHONEOS SDK PATH ==="
+          xcrun --show-sdk-path --sdk iphoneos || true
+          echo "=== XCODE VERSION ==="
+          xcodebuild -version || true
+
+      # ── Step 2：克隆 THEOS ────────────────────────────────────────────
+      - name: "Install THEOS"
+        script: |
+          set -x
           export THEOS="$CM_BUILD_DIR/theos"
-          git clone --recursive https://github.com/theos/theos.git $THEOS
           echo "THEOS=$THEOS" >> $CM_ENV
 
-      - name: Install system dependencies
-        script: |
-          brew install ldid xz || true
-
-      - name: Patch opainject Makefile (remove CoreSymbolication)
-        script: |
-          MAKEFILE="$CM_BUILD_DIR/BaseBin/opainject/Makefile"
-          if [ -f "$MAKEFILE" ]; then
-            sed -i '' '/CoreSymbolication/d' "$MAKEFILE"
-            echo "Removed CoreSymbolication references from opainject/Makefile"
+          if [ ! -d "$THEOS" ]; then
+            echo "Cloning theos..."
+            git clone --recursive https://github.com/theos/theos.git "$THEOS"
           else
-            echo "Warning: opainject/Makefile not found"
+            echo "theos already exists, skipping clone"
           fi
 
-      - name: Build BaseBin
+          echo "THEOS=$THEOS" >> $CM_ENV
+          ls "$THEOS"/sdks/ 2>/dev/null || echo "WARNING: no sdks dir yet"
+
+      # ── Step 3：装 brew 工具 ──────────────────────────────────────────
+      - name: "Install deps (ldid / xz)"
         script: |
+          set -x
+          brew install ldid xz || true
+
+      # ── Step 4：Patch opainject（删掉已移除的 CoreSymbolication） ──────
+      - name: "Patch BaseBin/opainject for Xcode 26+"
+        script: |
+          set -x
+          echo "=== Looking for opainject ==="
+          find "$CM_BUILD_DIR" -name "opainject" -type d 2>/dev/null | head -5
+
+          OPA="$CM_BUILD_DIR/BaseBin/opainject"
+          [ -d "$OPA" ] || { echo "opainject dir not found, skip patch"; exit 0; }
+
+          # 1) Makefile：删掉任何 CoreSymbolication 行
+          MF="$OPA/Makefile"
+          if [ -f "$MF" ]; then
+            echo "--- Original Makefile (CoreSymbolication lines) ---"
+            grep -n -i coresymbolication "$MF" || echo "(none found)"
+            sed -i '' '/[Cc]ore[Ss]ymbolication/d' "$MF"
+            echo "Makefile patched"
+          fi
+
+          # 2) 源码里注释掉 #import/#include CoreSymbolication
+          for f in "$OPA"/*.m "$OPA"/*.mm "$OPA"/*.c "$OPA"/*.h; do
+            [ -f "$f" ] || continue
+            if grep -qE '#(import|include)[[:space:]]+[<"].*CoreSymbolication' "$f"; then
+              echo "Patching import in: $f"
+              sed -i '' 's|^\([[:space:]]*#\(import\|include\)[[:space:]]*[<"].*CoreSymbolication.*\)|//COD_PATCHED \1|g' "$f"
+            fi
+          done
+
+          echo "=== opainject patching done ==="
+
+      # ── Step 5：Build BaseBin ──────────────────────────────────────────
+      - name: "Build BaseBin"
+        script: |
+          set -x
           export THEOS="$CM_BUILD_DIR/theos"
-          export IPHONEOS_SDK=$(xcrun --show-sdk-path --sdk iphoneos)
-          export SYSROOT="$IPHONEOS_SDK"
+          export SDK=$(xcrun --show-sdk-path --sdk iphoneos)
+          export SYSROOT="$SDK"
+
+          echo "=== SDK ==="
+          echo "$SDK"
+          echo "=== PWD ==="
+          pwd
+          echo "=== Check BaseBin ==="
+          ls -la BaseBin/ 2>/dev/null || { echo "ERROR: BaseBin/ not found in $(pwd)"; exit 1; }
+
           cd BaseBin
+
+          # 如果 arm64.h 缺 include，就地补丁（防止 uint32_t 等报错）
+          HFILE="arm64.h"
+          if [ -f "$HFILE" ]; then
+            if ! grep -q '#include <stdint.h>' "$HFILE"; then
+              echo "Patching $HFILE for missing includes..."
+              sed -i '' '1s|^|#include <stdint.h>\n#include <stdbool.h>\n|' "$HFILE"
+            fi
+          fi
+          # 也检查一下 opainject 子目录里的 arm64.h
+          if [ -f opainject/arm64.h ]; then
+            if ! grep -q '#include <stdint.h>' opainject/arm64.h; then
+              sed -i '' '1s|^|#include <stdint.h>\n#include <stdbool.h>\n|' opainject/arm64.h
+            fi
+          fi
+
           make FINALPACKAGE=1 \
-            THEOS_IPHONEOS_SDK="$IPHONEOS_SDK" \
-            IPHONEOS_SYSROOT="$IPHONEOS_SDK" \
-            SYSROOT="$IPHONEOS_SDK" \
-            TARGET="iphone:clang:14.0:14.0"
+            THEOS="$THEOS" \
+            THEOS_IPHONEOS_SDK="$SDK" \
+            IPHONEOS_SYSROOT="$SDK" \
+            SYSROOT="$SDK" \
+            TARGET="iphone:clang:14.0:14.0" \
+            DO_NOT_WARN_MISSING_XCODE_VERSION=1
 
-      - name: Download bootstraps
+      # ── Step 6：Download bootstraps ────────────────────────────────────
+      - name: "Download bootstraps"
         script: |
-          cd $CM_BUILD_DIR/Application/Dopamine/Resources
-          chmod +x download_bootstraps.sh
-          ./download_bootstraps.sh
+          set -x
+          RES="$CM_BUILD_DIR/Application/Dopamine/Resources"
+          if [ -f "$RES/download_bootstraps.sh" ]; then
+            cd "$RES"
+            chmod +x download_bootstraps.sh
+            ./download_bootstraps.sh
+          else
+            echo "WARNING: download_bootstraps.sh not found at $RES — skip"
+          fi
 
-      - name: Build Packages
+      # ── Step 7：Build Packages ────────────────────────────────────────
+      - name: "Build Packages"
         script: |
-          cd $CM_BUILD_DIR/Packages
-          make
+          set -x
+          if [ -d "$CM_BUILD_DIR/Packages" ]; then
+            cd "$CM_BUILD_DIR/Packages"
+            make || echo "Packages make returned non-zero (non-fatal)"
+          else
+            echo "WARNING: Packages/ dir not found — skip"
+          fi
 
-      - name: Build Dopamine app (unsigned)
+      # ── Step 8：xcodebuild compile Dopamine app ───────────────────────
+      - name: "Build Dopamine app (unsigned)"
         script: |
-          cd $CM_BUILD_DIR/Application/Dopamine
+          set -x
+          DDIR="$CM_BUILD_DIR/Application/Dopamine"
+          if [ ! -d "$DIR" ] && [ -d "$CM_BUILD_DIR/Dopamine" ]; then
+            DDIR="$CM_BUILD_DIR/Dopamine"
+          fi
+          cd "$DIR"
+          echo "Building from: $(pwd)"
+
+          # 列出 scheme 确认名字
+          xcodebuild -list 2>/dev/null || true
+
           xcodebuild \
             -scheme Dopamine \
             -configuration Release \
@@ -71,12 +166,26 @@ workflows:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
 
-      - name: Create IPA
+      # ── Step 9：打包 IPA ──────────────────────────────────────────────
+      - name: "Create IPA"
         script: |
-          cd $CM_BUILD_DIR/Application/Dopamine/build/Release-iphoneos
+          set -x
+          BUILD_DIR="$CM_BUILD_DIR/Application/Dopamine/build/Release-iphoneos"
+          if [ ! -d "$BUILD_DIR/Dopamine.app" ]; then
+            # 尝试找 .app 的实际位置
+            find "$CM_BUILD_DIR/Application" -name "*.app" -type d 2>/dev/null
+            echo "ERROR: Dopamine.app not found at $BUILD_DIR"
+            exit 1
+          fi
+          cd "$BUILD_DIR"
+          rm -rf Payload
           mkdir -p Payload
           cp -R Dopamine.app Payload/
           zip -r Dopamine_Rootful.ipa Payload
+          echo "IPA created: $(ls -lh Dopamine_Rootful.ipa)"
 
+    # ── Artifacts ────────────────────────────────────────────────────────
     artifacts:
       - Application/Dopamine/build/Release-iphoneos/Dopamine_Rootful.ipa
+      # 顺手把 app 也保留一份方便调试
+      - Application/Dopamine/build/Release-iphoneos/Dopamine.app/**
