@@ -153,9 +153,23 @@ workflows:
       - name: 08 - 编译Dopamine应用
         script: |
           set -x
-          PROJECT_FILE=$(find "$CM_BUILD_DIR" -maxdepth 3 -name "*.xcworkspace" -o -name "*.xcodeproj" 2>/dev/null | head -1)
+          # 智能查找 Dopamine 的 Xcode 项目：优先在 Application 目录，排除 BaseBin
+          PROJECT_FILE=""
+          # 尝试查找 Dopamine.xcodeproj 或 Dopamine.xcworkspace
+          for NAME in "Dopamine" "dopamine"; do
+            CANDIDATE=$(find "$CM_BUILD_DIR/Application" -maxdepth 3 -name "${NAME}.xcodeproj" -o -name "${NAME}.xcworkspace" 2>/dev/null | head -1)
+            if [ -n "$CANDIDATE" ]; then
+              PROJECT_FILE="$CANDIDATE"
+              break
+            fi
+          done
+          # 如果没找到，在整个仓库中查找（排除 BaseBin）
           if [ -z "$PROJECT_FILE" ]; then
-            echo "错误：未找到任何 Xcode 项目文件 (.xcodeproj 或 .xcworkspace)"
+            echo "未在 Application 目录找到 Dopamine 项目，全局搜索..."
+            PROJECT_FILE=$(find "$CM_BUILD_DIR" -maxdepth 4 -not -path "*/BaseBin/*" \( -name "*.xcodeproj" -o -name "*.xcworkspace" \) 2>/dev/null | head -1)
+          fi
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "错误：未找到任何 Xcode 项目文件"
             echo "当前目录结构："
             find "$CM_BUILD_DIR" -maxdepth 4 -name "*.xcodeproj" -o -name "*.xcworkspace" 2>/dev/null || true
             exit 1
@@ -166,6 +180,7 @@ workflows:
           echo "工作目录: $(pwd)"
           echo "可用的 Schemes:"
           xcodebuild -list -project "$PROJECT_FILE" 2>/dev/null || xcodebuild -list -workspace "$PROJECT_FILE" 2>/dev/null || true
+          # 从项目文件名提取 scheme 名称
           SCHEME_NAME=$(basename "$PROJECT_FILE" | sed 's/\.xcodeproj//;s/\.xcworkspace//')
           echo "尝试使用 Scheme: $SCHEME_NAME"
           xcodebuild \
@@ -180,11 +195,14 @@ workflows:
       - name: 09 - 打包为IPA
         script: |
           set -x
-          APP_PATH="$CM_BUILD_DIR/Application/Dopamine/build/Release-iphoneos/Dopamine.app"
-          if [ ! -d "$APP_PATH" ]; then
-            find "$CM_BUILD_DIR" -name "*.app" -type d 2>/dev/null
+          # 动态查找构建生成的 .app 文件
+          APP_PATH=$(find "$CM_BUILD_DIR" -maxdepth 5 -name "Dopamine.app" -type d 2>/dev/null | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "错误：未找到 Dopamine.app 构建产物"
+            find "$CM_BUILD_DIR" -name "*.app" -type d 2>/dev/null || true
             exit 1
           fi
+          echo "找到 .app 文件: $APP_PATH"
           IPA_DIR="$CM_BUILD_DIR/ipa_output"
           mkdir -p "$IPA_DIR"
           cd "$IPA_DIR"
