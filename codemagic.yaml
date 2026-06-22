@@ -1,20 +1,23 @@
-# codemagic.yaml
 workflows:
   build-dopamine-rootful:
     name: Build Dopamine Rootful IPA
-    macos: xcode-15.2              # ← 这里！不再放在 environment 下
+    max_build_duration: 120
+
     environment:
+      xcode: "15.2"
       vars:
         THEOS: "/Users/builder/clone/theos"
+
     scripts:
       - name: Install THEOS
         script: |
-          export THEOS=/Users/builder/clone/theos
+          export THEOS="$CM_BUILD_DIR/theos"
           git clone --recursive https://github.com/theos/theos.git $THEOS
           echo "THEOS=$THEOS" >> $CM_ENV
 
       - name: Install dependencies
-        script: brew install ldid xz
+        script: |
+          brew install ldid xz
 
       - name: Build BaseBin
         script: |
@@ -52,8 +55,3 @@ workflows:
 
     artifacts:
       - Application/Dopamine/build/Release-iphoneos/Dopamine_Rootful.ipa
-
-    publishing:
-      email:
-        recipients:
-          - your_email@example.com
