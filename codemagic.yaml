@@ -1,0 +1,73 @@
+# codemagic.yaml
+workflows:
+  build-dopamine-rootful:
+    name: Build Dopamine Rootful IPA
+    environment:
+      # 使用 macOS 虚拟机，并指定 Xcode 版本
+      macos:
+        xcode: 15.2
+      # 全局环境变量（会被传递到所有脚本）
+      vars:
+        THEOS: "/Users/builder/clone/theos"   # 注意：Codemagic 的工作目录是 /Users/builder/clone
+    scripts:
+      # Step 1: 安装 THEOS（从 GitHub 克隆）
+      - name: Install THEOS
+        script: |
+          export THEOS=/Users/builder/clone/theos
+          git clone --recursive https://github.com/theos/theos.git $THEOS
+          echo "THEOS=$THEOS" >> $CM_ENV         # Codemagic 专属的环境持久化方式
+
+      # Step 2: 安装系统依赖
+      - name: Install dependencies
+        script: |
+          brew install ldid xz
+          brew install --cask docker
+
+      # Step 3: 构建 BaseBin
+      - name: Build BaseBin
+        script: |
+          cd BaseBin
+          make
+
+      # Step 4: 下载 bootstrap 资源
+      - name: Download bootstraps
+        script: |
+          cd Application/Dopamine/Resources
+          chmod +x download_bootstraps.sh
+          ./download_bootstraps.sh
+
+      # Step 5: 构建 Packages
+      - name: Build Packages
+        script: |
+          cd Packages
+          make
+
+      # Step 6: 使用 xcodebuild 编译 Dopamine App（关闭签名）
+      - name: Build Dopamine app
+        script: |
+          cd Application/Dopamine
+          xcodebuild \
+            -scheme Dopamine \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      # Step 7: 打包成 IPA
+      - name: Create IPA
+        script: |
+          cd Application/Dopamine/build/Release-iphoneos
+          mkdir -p Payload
+          cp -R Dopamine.app Payload/
+          zip -r Dopamine_Rootful.ipa Payload
+
+    artifacts:
+      # 将生成的 IPA 作为构建产物输出，供下载
+      - Application/Dopamine/build/Release-iphoneos/Dopamine_Rootful.ipa
+
+    publishing:
+      # 可选：将产物发布到 Codemagic 内置的下载页面（默认已经可用）
+      email:
+        recipients:
+          - your_email@example.com   # 改为你自己的邮箱，用于接收构建结果通知（非必须）
