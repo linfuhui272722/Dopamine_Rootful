@@ -9,6 +9,7 @@ workflows:
         THEOS: "/Users/builder/clone/theos"
 
     scripts:
+
       - name: Debug check env & SDK
         script: |
           set -x
@@ -33,10 +34,17 @@ workflows:
           fi
           ls "$THEOS"/sdks/ 2>/dev/null || echo "No sdks dir yet"
 
-      - name: Install deps (ldid / xz)
+      - name: Install deps (ldid, xz, libarchive)
         script: |
           set -x
-          brew install ldid xz || true
+          brew install ldid xz libarchive || true
+          # 验证 libarchive 头文件
+          if [ -f /opt/homebrew/opt/libarchive/include/archive.h ]; then
+            echo "libarchive installed successfully"
+          else
+            echo "WARNING: archive.h not found, trying alternative paths"
+            find /opt/homebrew -name "archive.h" 2>/dev/null
+          fi
 
       - name: Patch BaseBin/opainject for Xcode 26+
         script: |
