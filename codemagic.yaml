@@ -41,6 +41,8 @@ workflows:
           brew install libarchive
           # 安装新版 GNU Make 以支持并行构建，加速编译（解决 Notice 提示）
           brew install make
+          export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
+          echo "PATH=$PATH" >> $CM_ENV
           # 验证工具安装
           which ldid
           which xz
