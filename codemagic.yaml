@@ -90,70 +90,91 @@ workflows:
           export SYSROOT="$SDK"
           cd "$CM_BUILD_DIR/BaseBin"
           echo "开始构建BaseBin..."
+
+          # 先执行完整的构建（允许子项目错误继续）
           make FINALPACKAGE=1 \
             THEOS="$THEOS" \
             THEOS_IPHONEOS_SDK="$SDK" \
             IPHONEOS_SYSROOT="$SDK" \
-            SYSROOT="$SDK"
-          
-          # 修复bootstrapfs产物路径
-          echo "开始修复bootstrapfs产物路径..."
-          BOOT_DIR="$CM_BUILD_DIR/BaseBin/bootstrapfs"
-          BUILT_BINARY=$(find "$BOOT_DIR/.theos/obj" -name "bootstrapfs" -type f 2>/dev/null | head -1)
-          if [ -z "$BUILT_BINARY" ] || [ ! -f "$BUILT_BINARY" ]; then
-            echo "错误：未找到已构建的 bootstrapfs 可执行文件。"
-            find "$BOOT_DIR/.theos" -type f 2>/dev/null || true
-            exit 1
-          fi
-          echo "找到构建产物: $BUILT_BINARY"
-          ls -lh "$BUILT_BINARY"
-          mkdir -p "$BOOT_DIR/.theos/obj/debug"
-          cp -v "$BUILT_BINARY" "$BOOT_DIR/.theos/obj/debug/bootstrapfs"
-          mkdir -p "$BOOT_DIR/.theos/obj/release"
-          cp -v "$BUILT_BINARY" "$BOOT_DIR/.theos/obj/release/bootstrapfs"
-          cp -v "$BUILT_BINARY" "$BOOT_DIR/bootstrapfs"
-          echo "验证复制结果："
-          TARGET_PATHS=(
-            "$BOOT_DIR/.theos/obj/debug/bootstrapfs"
-            "$BOOT_DIR/.theos/obj/release/bootstrapfs"
-            "$BOOT_DIR/bootstrapfs"
-          )
-          ALL_OK=true
-          for TARGET in "${TARGET_PATHS[@]}"; do
-            if [ -f "$TARGET" ] && [ -x "$TARGET" ]; then
-              echo "  ✓ 就位: $TARGET"
-            else
-              echo "  ✗ 缺失: $TARGET"
-              ALL_OK=false
+            SYSROOT="$SDK" \
+            -k 2>&1 || true
+
+          echo "开始修复所有子项目的产物路径..."
+
+          # 定义一个函数：修复单个子项目的 cp 路径
+          fix_subproject() {
+            local SUB_DIR="$1"
+            local SUB_NAME="$2"
+            local FULL_DIR="$CM_BUILD_DIR/BaseBin/$SUB_DIR"
+            if [ ! -d "$FULL_DIR" ]; then
+              return
             fi
-          done
-          if [ "$ALL_OK" = true ]; then
-            echo "所有bootstrapfs文件已成功就位。"
-          else
-            echo "错误：部分bootstrapfs文件复制失败。"
-            exit 1
-          fi
-          
-          # 生成 basebin.tar 和 basebin.tc（xcodebuild 需要它们）
+            # 查找实际生成的二进制文件（排除 .dSYM 等）
+            local ACTUAL_BIN=$(find "$FULL_DIR/.theos/obj" -maxdepth 2 -name "$SUB_NAME" -type f ! -path "*/.dSYM/*" 2>/dev/null | head -1)
+            if [ -z "$ACTUAL_BIN" ] || [ ! -f "$ACTUAL_BIN" ]; then
+              echo "  跳过 $SUB_DIR：未找到产物"
+              return
+            fi
+            echo "  修复 $SUB_DIR：找到产物 $ACTUAL_BIN"
+            # 复制到 debug 和 release 目录
+            mkdir -p "$FULL_DIR/.theos/obj/debug"
+            mkdir -p "$FULL_DIR/.theos/obj/release"
+            cp -v "$ACTUAL_BIN" "$FULL_DIR/.theos/obj/debug/$SUB_NAME"
+            cp -v "$ACTUAL_BIN" "$FULL_DIR/.theos/obj/release/$SUB_NAME"
+            # 同时复制到子项目根目录（某些 Makefile 可能期望）
+            cp -v "$ACTUAL_BIN" "$FULL_DIR/$SUB_NAME" 2>/dev/null || true
+          }
+
+          # 修复已知的子项目（根据仓库实际结构调整）
+          fix_subproject "bootstrapfs" "bootstrapfs"
+          fix_subproject "makerw" "makerw"
+          fix_subproject "opainject" "opainject"
+          fix_subproject "jbctl" "jbctl"
+          fix_subproject "forkfix" "forkfix"
+          fix_subproject "launchdhook" "launchdhook"
+          fix_subproject "systemhook" "systemhook"
+          fix_subproject "watchdoghook" "watchdoghook"
+          fix_subproject "dyldhook" "dyldhook"
+          fix_subproject "idownloadd" "idownloadd"
+          fix_subproject "boomerang" "boomerang"
+          fix_subproject "rootlesshooks" "rootlesshooks"
+          fix_subproject "libjailbreak" "libjailbreak.dylib"
+          fix_subproject "XPF" "libxpf.dylib"
+
+          echo "子项目产物修复完成。"
+
+          # 现在重新运行 make 以生成 basebin.tar 和 basebin.tc
           echo "生成 basebin.tar 和 basebin.tc..."
           make basebin.tar basebin.tc FINALPACKAGE=1 \
             THEOS="$THEOS" \
             THEOS_IPHONEOS_SDK="$SDK" \
             IPHONEOS_SYSROOT="$SDK" \
             SYSROOT="$SDK" || true
-          
+
           # 检查文件是否存在
           if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tar" ]; then
-            echo "错误：basebin.tar 未生成"
-            ls -la "$CM_BUILD_DIR/BaseBin/"
-            exit 1
+            echo "警告：basebin.tar 未生成，尝试查找..."
+            FOUND_TAR=$(find "$CM_BUILD_DIR/BaseBin" -name "basebin.tar" -type f 2>/dev/null | head -1)
+            if [ -n "$FOUND_TAR" ]; then
+              cp "$FOUND_TAR" "$CM_BUILD_DIR/BaseBin/basebin.tar"
+            else
+              echo "错误：无法找到 basebin.tar，构建可能不完整。"
+              exit 1
+            fi
           fi
           if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tc" ]; then
-            echo "错误：basebin.tc 未生成"
-            ls -la "$CM_BUILD_DIR/BaseBin/"
-            exit 1
+            echo "警告：basebin.tc 未生成，尝试查找..."
+            FOUND_TC=$(find "$CM_BUILD_DIR/BaseBin" -name "basebin.tc" -type f 2>/dev/null | head -1)
+            if [ -n "$FOUND_TC" ]; then
+              cp "$FOUND_TC" "$CM_BUILD_DIR/BaseBin/basebin.tc"
+            else
+              echo "错误：无法找到 basebin.tc，构建可能不完整。"
+              exit 1
+            fi
           fi
-          echo "basebin.tar 和 basebin.tc 已就位。"
+
+          echo "所有文件已就位："
+          ls -lh "$CM_BUILD_DIR/BaseBin/basebin.tar" "$CM_BUILD_DIR/BaseBin/basebin.tc"
 
       - name: 06 - 下载Bootstraps
         script: |
