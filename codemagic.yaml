@@ -9,127 +9,148 @@ workflows:
         THEOS: "/Users/builder/clone/theos"
 
     scripts:
-
-      - name: Debug check env & SDK
+      - name: 环境与SDK检测
         script: |
           set -x
-          echo "=== PWD ==="
+          echo "=== 当前目录 ==="
           pwd
-          echo "=== REPO ROOT LS ==="
+          echo "=== 仓库根目录文件列表 ==="
           ls -la
-          echo "=== XCODE-SELECT ==="
+          echo "=== 当前Xcode路径 ==="
           xcode-select -p || true
-          echo "=== IPHONEOS SDK PATH ==="
+          echo "=== iPhoneOS SDK 路径 ==="
           xcrun --show-sdk-path --sdk iphoneos || true
-          echo "=== XCODE VERSION ==="
+          echo "=== Xcode 版本 ==="
           xcodebuild -version || true
 
-      - name: Install THEOS
+      - name: 安装 THEOS
         script: |
           set -x
           export THEOS="$CM_BUILD_DIR/theos"
           echo "THEOS=$THEOS" >> $CM_ENV
           if [ ! -d "$THEOS" ]; then
             git clone --recursive https://github.com/theos/theos.git "$THEOS"
+            echo "THEOS 克隆完成。"
+          else
+            echo "THEOS 目录已存在，跳过克隆。"
           fi
-          ls "$THEOS"/sdks/ 2>/dev/null || echo "No sdks dir yet"
+          # 检查SDK目录（非必须，用于调试）
+          ls "$THEOS"/sdks/ 2>/dev/null || echo "信息: THEOS sdks 目录为空或不存在。"
 
-      - name: Install deps (ldid, xz, libarchive)
+      - name: 安装系统依赖 (ldid, xz, libarchive)
         script: |
           set -x
           brew install ldid xz libarchive || true
+          # 验证 libarchive 头文件是否已安装
           if [ -f /opt/homebrew/opt/libarchive/include/archive.h ]; then
-            echo "libarchive installed successfully"
+            echo "libarchive 已成功安装。"
           else
-            echo "WARNING: archive.h not found"
-            find /opt/homebrew -name "archive.h" 2>/dev/null
+            echo "警告: 未在默认路径找到 archive.h，尝试其他路径..."
+            find /opt/homebrew -name "archive.h" 2>/dev/null || true
           fi
 
-      - name: Patch all subprojects for Xcode 26+ compatibility
+      - name: 为 Xcode 26+ 修补子项目
         script: |
           set -x
-          # 1) opainject: remove CoreSymbolication
-          OPA="$CM_BUILD_DIR/BaseBin/opainject"
-          if [ -d "$OPA" ]; then
-            MF="$OPA/Makefile"
-            if [ -f "$MF" ]; then
-              sed -i '' '/[Cc]ore[Ss]ymbolication/d' "$MF"
-              echo "Patched opainject Makefile"
+          echo "开始应用兼容性补丁..."
+
+          # 1. 修补 opainject：移除对 CoreSymbolication 的引用
+          OPA_DIR="$CM_BUILD_DIR/BaseBin/opainject"
+          if [ -d "$OPA_DIR" ]; then
+            OPA_MAKEFILE="$OPA_DIR/Makefile"
+            if [ -f "$OPA_MAKEFILE" ]; then
+              sed -i '' '/[Cc]ore[Ss]ymbolication/d' "$OPA_MAKEFILE"
+              echo "  已修补 $OPA_MAKEFILE：移除 CoreSymbolication。"
             fi
-            for f in "$OPA"/*.m "$OPA"/*.mm "$OPA"/*.c "$OPA"/*.h; do
-              [ -f "$f" ] || continue
-              if grep -qE '#(import|include)[[:space:]]+[<"].*CoreSymbolication' "$f"; then
-                sed -i '' 's|^\([[:space:]]*#\(import\|include\)[[:space:]]*[<"].*CoreSymbolication.*\)|//PATCHED \1|g' "$f"
+            # 在源码文件中注释掉相关的 #import/#include
+            for SRC_FILE in "$OPA_DIR"/*.m "$OPA_DIR"/*.mm "$OPA_DIR"/*.c "$OPA_DIR"/*.h; do
+              [ -f "$SRC_FILE" ] || continue
+              if grep -qE '#(import|include)[[:space:]]+[<"].*CoreSymbolication' "$SRC_FILE"; then
+                sed -i '' 's|^\([[:space:]]*#\(import\|include\)[[:space:]]*[<"].*CoreSymbolication.*\)|// 已修补（Xcode 26+ 兼容） \1|g' "$SRC_FILE"
+                echo "  已修补源码文件中的导入语句: $SRC_FILE"
               fi
             done
+          else
+            echo "  跳过 opainject 补丁：目录未找到。"
           fi
 
-          # 2) arm64.h patches (add missing stdint/stdbool)
-          for h in "$CM_BUILD_DIR/BaseBin/arm64.h" "$CM_BUILD_DIR/BaseBin/opainject/arm64.h"; do
-            [ -f "$h" ] || continue
-            if ! grep -q '#include <stdint.h>' "$h"; then
-              sed -i '' '1s|^|#include <stdint.h>\n#include <stdbool.h>\n|' "$h"
-              echo "Patched $h"
+          # 2. 修补 arm64.h：添加缺失的标准头文件
+          for HEADER_FILE in "$CM_BUILD_DIR/BaseBin/arm64.h" "$CM_BUILD_DIR/BaseBin/opainject/arm64.h"; do
+            [ -f "$HEADER_FILE" ] || continue
+            if ! grep -q '#include <stdint.h>' "$HEADER_FILE"; then
+              sed -i '' '1s|^|#include <stdint.h>\n#include <stdbool.h>\n|' "$HEADER_FILE"
+              echo "  已修补 $HEADER_FILE：添加 <stdint.h> 和 <stdbool.h>。"
             fi
           done
 
-          # 3) bootstrapfs: fix cp path (replace 'debug' with 'release')
-          BOOT_MK="$CM_BUILD_DIR/BaseBin/bootstrapfs/Makefile"
-          if [ -f "$BOOT_MK" ]; then
-            # 将 cp 命令中的 'debug' 替换为 'release'（假设 FINALPACKAGE=1 时产物在 release 下）
-            sed -i '' 's|\.theos/obj/debug/|.theos/obj/release/|g' "$BOOT_MK"
-            echo "Fixed bootstrapfs/Makefile: cp path now uses release"
-            # 同时确保 TARGET 正确（可选，但保留以防万一）
-            # 如果仍有 arm64e 警告，取消下面注释：
-            # sed -i '' '/^TARGET\s*:/d' "$BOOT_MK"
-            # sed -i '' '1s/^/TARGET := iphone:clang:14.0:14.0\n/' "$BOOT_MK"
+          # 3. 关键修补：修正 bootstrapfs 的构建配置
+          BOOTSTRAP_MAKEFILE="$CM_BUILD_DIR/BaseBin/bootstrapfs/Makefile"
+          if [ -f "$BOOTSTRAP_MAKEFILE" ]; then
+            # 3a. 确保部署目标为 iOS 14.0+ (解决 arm64e 警告和兼容性)
+            if ! grep -q '^TARGET\s*:=\s*iphone:clang:1[4-9]' "$BOOTSTRAP_MAKEFILE"; then
+              sed -i '' '1s/^/TARGET := iphone:clang:14.0:14.0\n\n/' "$BOOTSTRAP_MAKEFILE"
+              echo "  已修补 $BOOTSTRAP_MAKEFILE：设置 TARGET=iphone:clang:14.0:14.0。"
+            fi
+            # 3b. 修正 cp 命令中的硬编码路径，从 'debug' 改为 'release'
+            if grep -q '\.theos/obj/debug/' "$BOOTSTRAP_MAKEFILE"; then
+              sed -i '' 's|\.theos/obj/debug/|.theos/obj/release/|g' "$BOOTSTRAP_MAKEFILE"
+              echo "  已修补 $BOOTSTRAP_MAKEFILE：将 cp 路径从 'debug' 更正为 'release'。"
+            fi
           else
-            echo "WARNING: bootstrapfs/Makefile not found"
+            echo "  警告：未找到 bootstrapfs/Makefile，跳过其补丁。"
           fi
+          echo "所有兼容性补丁应用完成。"
 
-      - name: Build BaseBin
+      - name: 构建 BaseBin
         script: |
           set -x
           export THEOS="$CM_BUILD_DIR/theos"
           export SDK=$(xcrun --show-sdk-path --sdk iphoneos)
           export SYSROOT="$SDK"
+          echo "使用 SDK: $SDK"
           cd BaseBin
           make FINALPACKAGE=1 \
             THEOS="$THEOS" \
             THEOS_IPHONEOS_SDK="$SDK" \
             IPHONEOS_SYSROOT="$SDK" \
-            SYSROOT="$SDK" \
-            DO_NOT_WARN_MISSING_XCODE_VERSION=1
+            SYSROOT="$SDK"
 
-      - name: Download bootstraps
+      - name: 下载 Bootstraps
         script: |
           set -x
-          RES="$CM_BUILD_DIR/Application/Dopamine/Resources"
-          if [ -f "$RES/download_bootstraps.sh" ]; then
-            cd "$RES"
+          RESOURCES_DIR="$CM_BUILD_DIR/Application/Dopamine/Resources"
+          if [ -f "$RESOURCES_DIR/download_bootstraps.sh" ]; then
+            cd "$RESOURCES_DIR"
             chmod +x download_bootstraps.sh
             ./download_bootstraps.sh
+            echo "Bootstraps 下载完成。"
           else
-            echo "WARNING: download_bootstraps.sh not found"
+            echo "警告：未找到 download_bootstraps.sh 脚本，跳过此步。"
           fi
 
-      - name: Build Packages
+      - name: 构建 Packages
         script: |
           set -x
           if [ -d "$CM_BUILD_DIR/Packages" ]; then
             cd "$CM_BUILD_DIR/Packages"
-            make || echo "Packages make returned non-zero (non-fatal)"
+            make || echo "注意：Packages 的 make 过程返回了非零状态（可能非致命）。"
           else
-            echo "WARNING: Packages/ dir not found"
+            echo "警告：未找到 Packages 目录，跳过此步。"
           fi
 
-      - name: Build Dopamine app (unsigned)
+      - name: 构建未签名的 Dopamine 应用
         script: |
           set -x
-          DIR="$CM_BUILD_DIR/Application/Dopamine"
-          [ -d "$DIR" ] || DIR="$CM_BUILD_DIR/Dopamine"
-          cd "$DIR"
-          xcodebuild -list 2>/dev/null || true
+          # 尝试定位 Xcode 项目目录
+          APP_DIR="$CM_BUILD_DIR/Application/Dopamine"
+          [ -d "$APP_DIR" ] || APP_DIR="$CM_BUILD_DIR/Dopamine"
+          if [ ! -d "$APP_DIR" ]; then
+            echo "错误：找不到包含 Xcode 项目的 Application/Dopamine 或 Dopamine 目录。"
+            exit 1
+          fi
+          cd "$APP_DIR"
+          echo "在目录中构建: $(pwd)"
+          xcodebuild -list 2>/dev/null || echo "信息: xcodebuild -list 失败或未输出。"
           xcodebuild \
             -scheme Dopamine \
             -configuration Release \
@@ -138,21 +159,22 @@ workflows:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
 
-      - name: Create IPA
+      - name: 打包为 IPA
         script: |
           set -x
-          BUILD_DIR="$CM_BUILD_DIR/Application/Dopamine/build/Release-iphoneos"
-          if [ ! -d "$BUILD_DIR/Dopamine.app" ]; then
+          BUILD_OUTPUT_DIR="$CM_BUILD_DIR/Application/Dopamine/build/Release-iphoneos"
+          if [ ! -d "$BUILD_OUTPUT_DIR/Dopamine.app" ]; then
+            echo "错误：在 $BUILD_OUTPUT_DIR 中未找到 Dopamine.app。"
+            echo "尝试搜索 .app 文件..."
             find "$CM_BUILD_DIR/Application" -name "*.app" -type d 2>/dev/null
-            echo "ERROR: Dopamine.app not found at $BUILD_DIR"
             exit 1
           fi
-          cd "$BUILD_DIR"
+          cd "$BUILD_OUTPUT_DIR"
           rm -rf Payload
           mkdir -p Payload
           cp -R Dopamine.app Payload/
           zip -r Dopamine_Rootful.ipa Payload
-          echo "IPA created: $(ls -lh Dopamine_Rootful.ipa)"
+          echo "IPA 文件创建成功: $(ls -lh Dopamine_Rootful.ipa)"
 
     artifacts:
       - Application/Dopamine/build/Release-iphoneos/Dopamine_Rootful.ipa
