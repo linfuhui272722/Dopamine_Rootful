@@ -1,7 +1,7 @@
 workflows:
   build-dopamine-rootful:
     name: Build Dopamine Rootful IPA
-    max_build_duration: 150
+    max_build_duration: 120        # ← 改为 120，符合上限
     environment:
       xcode: latest
       vars:
@@ -31,7 +31,6 @@ workflows:
         script: |
           MAKEFILE="$CM_BUILD_DIR/BaseBin/opainject/Makefile"
           if [ -f "$MAKEFILE" ]; then
-            # Remove any line containing CoreSymbolication
             sed -i '' '/CoreSymbolication/d' "$MAKEFILE"
             echo "Removed CoreSymbolication references from opainject/Makefile"
           else
