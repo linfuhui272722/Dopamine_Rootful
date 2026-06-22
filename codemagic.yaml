@@ -2,9 +2,8 @@
 workflows:
   build-dopamine-rootful:
     name: Build Dopamine Rootful IPA
+    macos: xcode-15.2              # ← 这里！不再放在 environment 下
     environment:
-      # ✅ 正确写法：直接写 "xcode:15.2" 或 "xcode-15.2"（看版本别名）
-      macos: xcode-15.2
       vars:
         THEOS: "/Users/builder/clone/theos"
     scripts:
@@ -15,8 +14,7 @@ workflows:
           echo "THEOS=$THEOS" >> $CM_ENV
 
       - name: Install dependencies
-        script: |
-          brew install ldid xz
+        script: brew install ldid xz
 
       - name: Build BaseBin
         script: |
@@ -58,4 +56,4 @@ workflows:
     publishing:
       email:
         recipients:
-          - your_email@example.com   # 改为你的邮箱，非必需
+          - your_email@example.com
