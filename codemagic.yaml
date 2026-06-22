@@ -73,14 +73,16 @@ workflows:
             fi
           done
 
-          # 3) boostrapfs: force deployment target to 14.0
+          # 3) bootstrapfs: fix cp path (replace 'debug' with 'release')
           BOOT_MK="$CM_BUILD_DIR/BaseBin/bootstrapfs/Makefile"
           if [ -f "$BOOT_MK" ]; then
-            # Remove any existing TARGET line (to avoid duplication)
-            sed -i '' '/^TARGET\s*:/d' "$BOOT_MK"
-            # Insert at top
-            sed -i '' '1s/^/TARGET := iphone:clang:14.0:14.0\n/' "$BOOT_MK"
-            echo "Patched bootstrapfs/Makefile: set TARGET=14.0"
+            # 将 cp 命令中的 'debug' 替换为 'release'（假设 FINALPACKAGE=1 时产物在 release 下）
+            sed -i '' 's|\.theos/obj/debug/|.theos/obj/release/|g' "$BOOT_MK"
+            echo "Fixed bootstrapfs/Makefile: cp path now uses release"
+            # 同时确保 TARGET 正确（可选，但保留以防万一）
+            # 如果仍有 arm64e 警告，取消下面注释：
+            # sed -i '' '/^TARGET\s*:/d' "$BOOT_MK"
+            # sed -i '' '1s/^/TARGET := iphone:clang:14.0:14.0\n/' "$BOOT_MK"
           else
             echo "WARNING: bootstrapfs/Makefile not found"
           fi
