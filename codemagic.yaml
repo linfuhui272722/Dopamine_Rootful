@@ -28,7 +28,7 @@ workflows:
         script: |
           set -x
           export HOMEBREW_NO_REQUIRE_TAP_TRUST=1
-          brew install ldid xz libarchive
+          brew install ldid xz libarchive dpkg
           brew install make
           export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
           echo "PATH=$PATH" >> $CM_ENV
