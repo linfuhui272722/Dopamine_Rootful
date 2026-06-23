@@ -88,9 +88,13 @@ workflows:
           source $CM_ENV
           export SDK=$(xcrun --show-sdk-path --sdk iphoneos)
           export SYSROOT="$SDK"
-          cd "$CM_BUILD_DIR/BaseBin"
-          echo "开始构建BaseBin..."
+          export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
+          export THEOS="$CM_BUILD_DIR/theos"
 
+          cd "$CM_BUILD_DIR/BaseBin"
+          echo "=== 开始构建 BaseBin ==="
+
+          # —— 1. 全量构建（允许子项目错）——
           make FINALPACKAGE=1 \
             THEOS="$THEOS" \
             THEOS_IPHONEOS_SDK="$SDK" \
@@ -98,28 +102,56 @@ workflows:
             SYSROOT="$SDK" \
             -k 2>&1 || true
 
-          echo "开始修复所有子项目的产物路径..."
+          # —— 2. 编译 trustcache（macOS 主机工具）——
+          echo "编译 trustcache..."
+          # 寻找 trustcache 源码（可能在 BaseBin/trustcache 或 _external 中）
+          TC_DIR=$(find "$CM_BUILD_DIR/BaseBin" -maxdepth 3 -name "trustcache" -type d 2>/dev/null | head -1)
+          if [ -z "$TC_DIR" ]; then
+            # 也可能是单个 .c 文件
+            TC_C=$(find "$CM_BUILD_DIR/BaseBin" -maxdepth 3 -name "trustcache.c" -type f 2>/dev/null | head -1)
+            if [ -n "$TC_C" ]; then
+              TC_DIR=$(dirname "$TC_C")
+            fi
+          fi
 
+          if [ -n "$TC_DIR" ]; then
+            echo "找到 trustcache 源码目录: $TC_DIR"
+            cd "$TC_DIR"
+            # 尝试用 make（如果有 Makefile）
+            if [ -f Makefile ]; then
+              make 2>&1 || true
+            fi
+            # 如果 make 没产生二进制，直接 clang 编译
+            if [ ! -f trustcache ] && [ -f trustcache.c ]; then
+              clang -O2 trustcache.c -o trustcache -I. 2>&1 || true
+            fi
+            # 将二进制放入 PATH
+            if [ -f trustcache ] && [ -x trustcache ]; then
+              export PATH="$TC_DIR:$PATH"
+              echo "trustcache 编译成功: $TC_DIR/trustcache"
+              trustcache --help 2>&1 || true
+            else
+              echo "⚠️ trustcache 编译失败，尝试备用方案..."
+            fi
+          else
+            echo "⚠️ 未找到 trustcache 源码，尝试从 .build 中恢复..."
+          fi
+
+          # 回到 BaseBin 根目录
+          cd "$CM_BUILD_DIR/BaseBin"
+
+          # —— 3. 修复子项目 cp 路径——
           fix_subproject() {
-            local SUB_DIR="$1"
-            local SUB_NAME="$2"
-            local FULL_DIR="$CM_BUILD_DIR/BaseBin/$SUB_DIR"
-            if [ ! -d "$FULL_DIR" ]; then
-              return
-            fi
-            local ACTUAL_BIN=$(find "$FULL_DIR/.theos/obj" -maxdepth 2 -name "$SUB_NAME" -type f ! -path "*/.dSYM/*" 2>/dev/null | head -1)
-            if [ -z "$ACTUAL_BIN" ] || [ ! -f "$ACTUAL_BIN" ]; then
-              echo "  跳过 $SUB_DIR：未找到产物"
-              return
-            fi
-            echo "  修复 $SUB_DIR：找到产物 $ACTUAL_BIN"
-            mkdir -p "$FULL_DIR/.theos/obj/debug"
-            mkdir -p "$FULL_DIR/.theos/obj/release"
-            cp -v "$ACTUAL_BIN" "$FULL_DIR/.theos/obj/debug/$SUB_NAME"
-            cp -v "$ACTUAL_BIN" "$FULL_DIR/.theos/obj/release/$SUB_NAME"
-            cp -v "$ACTUAL_BIN" "$FULL_DIR/$SUB_NAME" 2>/dev/null || true
+            local SUB_DIR="$1" SUB_NAME="$2"
+            local FULL="$CM_BUILD_DIR/BaseBin/$SUB_DIR"
+            [ -d "$FULL" ] || return
+            local BIN=$(find "$FULL/.theos/obj" -maxdepth 2 -name "$SUB_NAME" -type f ! -path "*/.dSYM/*" 2>/dev/null | head -1)
+            [ -z "$BIN" ] && return
+            mkdir -p "$FULL/.theos/obj/debug" "$FULL/.theos/obj/release"
+            cp -v "$BIN" "$FULL/.theos/obj/debug/$SUB_NAME"
+            cp -v "$BIN" "$FULL/.theos/obj/release/$SUB_NAME"
+            cp -v "$BIN" "$FULL/$SUB_NAME" 2>/dev/null || true
           }
-
           fix_subproject "bootstrapfs" "bootstrapfs"
           fix_subproject "makerw" "makerw"
           fix_subproject "opainject" "opainject"
@@ -134,36 +166,44 @@ workflows:
           fix_subproject "rootlesshooks" "rootlesshooks"
           fix_subproject "libjailbreak" "libjailbreak.dylib"
           fix_subproject "XPF" "libxpf.dylib"
-
           echo "子项目产物修复完成。"
 
-          echo "尝试生成 basebin.tar 和 basebin.tc..."
+          # —— 4. 生成 basebin.tar 和 basebin.tc（现在 trustcache 应该可用）——
+          echo "生成 basebin.tar 和 basebin.tc..."
           make basebin.tar basebin.tc FINALPACKAGE=1 \
             THEOS="$THEOS" \
             THEOS_IPHONEOS_SDK="$SDK" \
             IPHONEOS_SYSROOT="$SDK" \
             SYSROOT="$SDK" 2>&1 || true
 
-          if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tar" ]; then
-            echo "手动创建 basebin.tar..."
+          # —— 5. 兜底：如果 basebin.tc 仍然缺失，手动调用 trustcache 创建——
+          if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tc" ]; then
+            echo "make 仍未能生成 basebin.tc，手动调用 trustcache..."
             cd "$CM_BUILD_DIR/BaseBin"
-            if [ -d ".build" ] && [ "$(ls -A .build)" ]; then
-              tar -cf basebin.tar .build
-              echo "basebin.tar 创建成功"
+            TRUSTCACHE=$(which trustcache 2>/dev/null || find . -name trustcache -type f -perm +111 2>/dev/null | head -1)
+            if [ -n "$TRUSTCACHE" ]; then
+              "$TRUSTCACHE" create .build/basebin.tc .build 2>&1 || \
+              "$TRUSTCACHE" .build .build/basebin.tc 2>&1 || true
             else
-              echo "错误：.build 目录为空或不存在，无法创建 basebin.tar"
+              echo "❌ trustcache 命令仍然不可用，构建失败"
               exit 1
             fi
           fi
 
-          if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tc" ]; then
-            echo "手动创建 basebin.tc（空文件）..."
-            touch "$CM_BUILD_DIR/BaseBin/basebin.tc"
-            echo "basebin.tc 创建成功"
+          # 确保 basebin.tar 存在
+          if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tar" ]; then
+            echo "basebin.tar 缺失，手动打包 .build..."
+            tar -cf basebin.tar .build
           fi
 
-          echo "验证最终文件："
+          # —— 6. 验证 ——
+          echo "=== 最终验证 ==="
           ls -lh "$CM_BUILD_DIR/BaseBin/basebin.tar" "$CM_BUILD_DIR/BaseBin/basebin.tc"
+          if [ ! -s "$CM_BUILD_DIR/BaseBin/basebin.tc" ]; then
+            echo "❌ basebin.tc 仍然是空的或不存在"
+            exit 1
+          fi
+          echo "✅ BaseBin 构建成功"
 
       - name: 06 - 下载Bootstraps
         script: |
@@ -213,7 +253,6 @@ workflows:
           SCHEME_NAME=$(basename "$PROJECT_FILE" | sed 's/\.xcodeproj//;s/\.xcworkspace//')
           echo "尝试使用 Scheme: $SCHEME_NAME"
 
-          # 指定 derivedDataPath 到已知目录
           DERIVED_DATA="$CM_BUILD_DIR/build"
           xcodebuild \
             -scheme "$SCHEME_NAME" \
@@ -228,11 +267,9 @@ workflows:
       - name: 09 - 打包为IPA
         script: |
           set -x
-          # 搜索构建产物（现在在 $CM_BUILD_DIR/build 下）
           APP_PATH=$(find "$CM_BUILD_DIR/build" -maxdepth 5 -name "Dopamine.app" -type d 2>/dev/null | head -1)
           if [ -z "$APP_PATH" ]; then
             echo "错误：未找到 Dopamine.app 构建产物"
-            echo "搜索所有 .app 文件："
             find "$CM_BUILD_DIR" -name "*.app" -type d 2>/dev/null || true
             exit 1
           fi
