@@ -81,7 +81,6 @@ workflows:
           fi
 
           echo "=== 统一 pmap_cs 偏移为 0x88（避免 M1/A15 差异导致紫屏） ==="
-          # 查找所有包含 pmap_cs_main 的偏移文件，将 0x90 全部改为 0x88
           OFFSET_FILES=$(find "$CM_BUILD_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.inc" \) \
             -not -path "*/.git/*" -not -path "*/theos/*" \
             2>/dev/null | xargs grep -l "pmap_cs_main" 2>/dev/null)
@@ -89,9 +88,7 @@ workflows:
           echo "$OFFSET_FILES"
           for f in $OFFSET_FILES; do
             echo "--- 校准 $f ---"
-            # 将 pmap_cs_main 的值强制改为 0x88
             sed -i '' 's/pmap\.pmap_cs_main[[:space:]]*=[[:space:]]*0x[0-9a-fA-F]*/pmap.pmap_cs_main = 0x88  \/\/ Unified fix (was previously device-specific)/' "$f"
-            # 将 pmap_cs_code_directory.main_binary 的值强制改为 0x48
             sed -i '' 's/pmap_cs_code_directory\.main_binary[[:space:]]*=[[:space:]]*0x[0-9a-fA-F]*/pmap_cs_code_directory.main_binary = 0x48  \/\/ Unified fix/' "$f"
             grep -n 'pmap_cs_main\|pmap_cs_code_directory' "$f" | head -6 || true
           done
@@ -152,7 +149,16 @@ workflows:
       - name: 07 - 构建Packages
         script: |
           set -x
-          [ -d "$CM_BUILD_DIR/Packages" ] && { cd "$CM_BUILD_DIR/Packages"; make; }
+          if [ -d "$CM_BUILD_DIR/Packages" ]; then
+            cd "$CM_BUILD_DIR/Packages"
+            # 确保 libjailbreak 头文件可被找到（复制到 .include 目录）
+            mkdir -p "../../BaseBin/.include/libjailbreak"
+            # 使用绝对路径复制头文件
+            cp -R "$CM_BUILD_DIR/BaseBin/libjailbreak/"* "../../BaseBin/.include/libjailbreak/" 2>/dev/null || true
+            # 同时创建符号链接作为备用
+            ln -sf "$CM_BUILD_DIR/BaseBin/libjailbreak" "../../BaseBin/.include/libjailbreak" 2>/dev/null || true
+            make
+          fi
 
       - name: 08 - 编译Dopamine应用（使用默认 PUAF Pages = 3072，pmap_cs 已统一校准）
         script: |
