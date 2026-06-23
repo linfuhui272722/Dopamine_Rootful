@@ -146,35 +146,31 @@ workflows:
           RES="$CM_BUILD_DIR/Application/Dopamine/Resources"
           [ -f "$RES/download_bootstraps.sh" ] && { cd "$RES"; bash download_bootstraps.sh; }
 
-      - name: 07 - 构建Packages
+      - name: 07 - 构建Packages（使用绝对路径）
         script: |
           set -x
           if [ -d "$CM_BUILD_DIR/Packages" ]; then
             cd "$CM_BUILD_DIR/Packages"
-            # 查找 libjailbreak.h 的真实位置
-            HEADER_PATH=$(find "$CM_BUILD_DIR/BaseBin/libjailbreak" -name "libjailbreak.h" -type f 2>/dev/null | head -1)
-            if [ -z "$HEADER_PATH" ]; then
-              echo "❌ 未找到 libjailbreak.h"
-              exit 1
+            
+            # 绝对路径
+            ABS_INCLUDE="$CM_BUILD_DIR/BaseBin/.include"
+            ABS_BUILD="$CM_BUILD_DIR/BaseBin/.build"
+            
+            # 确保头文件目录存在并复制所有头文件
+            mkdir -p "$ABS_INCLUDE/libjailbreak"
+            HEADER_SRC="$CM_BUILD_DIR/BaseBin/libjailbreak/src"
+            if [ -d "$HEADER_SRC" ]; then
+              cp "$HEADER_SRC"/*.h "$ABS_INCLUDE/libjailbreak/" 2>/dev/null || true
             fi
-            echo "找到 libjailbreak.h: $HEADER_PATH"
-            # 获取包含 libjailbreak.h 的目录（可能是 libjailbreak 本身或其子目录）
-            HEADER_DIR=$(dirname "$HEADER_PATH")
-            # 目标是使 ../../BaseBin/.include/libjailbreak/libjailbreak.h 可访问
-            # 删除旧的 .include/libjailbreak
-            rm -rf "../../BaseBin/.include/libjailbreak"
-            # 创建符号链接：.include/libjailbreak -> HEADER_DIR
-            ln -sf "$HEADER_DIR" "../../BaseBin/.include/libjailbreak"
-            # 验证
-            if [ ! -f "../../BaseBin/.include/libjailbreak/libjailbreak.h" ]; then
-              echo "符号链接失败，尝试直接复制..."
-              mkdir -p "../../BaseBin/.include/libjailbreak"
-              cp "$HEADER_PATH" "../../BaseBin/.include/libjailbreak/libjailbreak.h"
-              # 复制同一目录下所有头文件（可能还有其他需要的头文件）
-              cp "$HEADER_DIR"/*.h "../../BaseBin/.include/libjailbreak/" 2>/dev/null || true
+            
+            # 修改 libkrw-provider 的 Makefile 中的相对路径为绝对路径
+            MAKEFILE="$CM_BUILD_DIR/Packages/libkrw-provider/Makefile"
+            if [ -f "$MAKEFILE" ]; then
+              sed -i '' "s|-I\.\./\.\./BaseBin/\.include|-I$ABS_INCLUDE|g" "$MAKEFILE"
+              sed -i '' "s|-L\.\./\.\./BaseBin/\.build|-L$ABS_BUILD|g" "$MAKEFILE"
             fi
-            # 确认
-            ls -l "../../BaseBin/.include/libjailbreak/libjailbreak.h"
+            
+            # 执行 make
             make
           fi
 
