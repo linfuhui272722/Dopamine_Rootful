@@ -146,13 +146,12 @@ workflows:
           RES="$CM_BUILD_DIR/Application/Dopamine/Resources"
           [ -f "$RES/download_bootstraps.sh" ] && { cd "$RES"; bash download_bootstraps.sh; }
 
-      - name: 07 - 构建Packages（使用绝对路径）
+      - name: 07 - 构建Packages（修复链接器找不到 libjailbreak）
         script: |
           set -x
           if [ -d "$CM_BUILD_DIR/Packages" ]; then
             cd "$CM_BUILD_DIR/Packages"
             
-            # 绝对路径
             ABS_INCLUDE="$CM_BUILD_DIR/BaseBin/.include"
             ABS_BUILD="$CM_BUILD_DIR/BaseBin/.build"
             
@@ -163,7 +162,17 @@ workflows:
               cp "$HEADER_SRC"/*.h "$ABS_INCLUDE/libjailbreak/" 2>/dev/null || true
             fi
             
-            # 修改 libkrw-provider 的 Makefile 中的相对路径为绝对路径
+            # 找到 libjailbreak.dylib 的实际位置
+            LIBAILBREAK_DYLIB=$(find "$CM_BUILD_DIR/BaseBin/libjailbreak" -name "libjailbreak.dylib" -type f 2>/dev/null | head -1)
+            if [ -z "$LIBAILBREAK_DYLIB" ]; then
+              echo "❌ 未找到 libjailbreak.dylib"
+              exit 1
+            fi
+            echo "找到 libjailbreak.dylib: $LIBAILBREAK_DYLIB"
+            # 复制到 .build 目录，以便链接器能找到
+            cp "$LIBAILBREAK_DYLIB" "$ABS_BUILD/libjailbreak.dylib"
+            
+            # 修改 Makefile 中的 -I 和 -L 为绝对路径
             MAKEFILE="$CM_BUILD_DIR/Packages/libkrw-provider/Makefile"
             if [ -f "$MAKEFILE" ]; then
               sed -i '' "s|-I\.\./\.\./BaseBin/\.include|-I$ABS_INCLUDE|g" "$MAKEFILE"
