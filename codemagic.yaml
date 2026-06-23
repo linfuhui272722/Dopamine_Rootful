@@ -125,10 +125,10 @@ workflows:
               echo "trustcache 编译成功: $TC_DIR/trustcache"
               trustcache --help 2>&1 || true
             else
-              echo "⚠️ trustcache 编译失败，将使用 Python 生成 basebin.tc"
+              echo "⚠️ trustcache 编译失败，将使用 ldid 生成 basebin.tc"
             fi
           else
-            echo "⚠️ 未找到 trustcache 源码，将使用 Python 生成 basebin.tc"
+            echo "⚠️ 未找到 trustcache 源码，将使用 ldid 生成 basebin.tc"
           fi
           cd "$CM_BUILD_DIR/BaseBin"
 
@@ -189,8 +189,52 @@ workflows:
             SYSROOT="$SDK" 2>&1 || true
 
           if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tc" ]; then
-            echo "make basebin.tc 失败，使用 Python 生成..."
-            python3 -c "import os, struct, hashlib; build_dir='/Users/builder/clone/BaseBin/.build'; output_path='/Users/builder/clone/BaseBin/basebin.tc'; entries=[]; [entries.append((hashlib.sha1(open(os.path.join(r,f),'rb').read()).digest(), os.path.relpath(os.path.join(r,f), build_dir).encode())) for r,d,fs in os.walk(build_dir) for f in sorted(fs)]; entries.sort(key=lambda e:e[1]); header=struct.pack('<II',1,len(entries)); open(output_path,'wb').write(header); [open(output_path,'ab').write(e[0]+struct.pack('<I',len(e[1]))+e[1]) for e in entries]; print(f'Generated basebin.tc with {len(entries)} entries')"
+            echo "make basebin.tc 失败，使用 ldid 生成..."
+            # 将 Python 脚本写入临时文件以避免 heredoc 缩进问题
+            cat > /tmp/gen_tc.py << 'ENDSCRIPT'
+import os, struct, subprocess
+
+build_dir = '/Users/builder/clone/BaseBin/.build'
+output_path = '/Users/builder/clone/BaseBin/basebin.tc'
+
+def get_cdhash(filepath):
+    try:
+        out = subprocess.check_output(['ldid', '-h', filepath], stderr=subprocess.STDOUT)
+        for line in out.decode().splitlines():
+            if line.startswith('cdhash:'):
+                return bytes.fromhex(line.split(':')[1].strip())
+    except Exception as e:
+        print(f'  Failed to get cdhash for {filepath}: {e}')
+        return None
+
+entries = []
+for root, dirs, files in os.walk(build_dir):
+    for f in sorted(files):
+        filepath = os.path.join(root, f)
+        relpath = os.path.relpath(filepath, build_dir)
+        # 只处理 Mach-O 文件（通过 magic 判断）
+        with open(filepath, 'rb') as fp:
+            magic = fp.read(4)
+        if magic not in (b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe'):
+            continue  # 不是 Mach-O，跳过
+        cdhash = get_cdhash(filepath)
+        if cdhash is None:
+            continue
+        path_bytes = relpath.encode('utf-8')
+        entries.append((cdhash, path_bytes))
+
+entries.sort(key=lambda e: e[1])
+count = len(entries)
+header = struct.pack('<II', 1, count)
+with open(output_path, 'wb') as f:
+    f.write(header)
+    for cdhash, path_bytes in entries:
+        f.write(cdhash)
+        f.write(struct.pack('<I', len(path_bytes)))
+        f.write(path_bytes)
+print(f'Generated basebin.tc with {count} entries')
+ENDSCRIPT
+            python3 /tmp/gen_tc.py
           fi
 
           # —— 6. 验证 ——
