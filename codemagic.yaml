@@ -46,11 +46,8 @@ workflows:
           cd "$TRUSTCACHE_DIR"
           git pull || true
           
-          # 清除并重新编译 trustcache
           echo "编译 trustcache..."
           gmake clean || true
-          
-          # 使用默认的 libmd 而不是 OpenSSL
           LIBMD_DIR="$(brew --prefix libmd)"
           CFLAGS="-I${LIBMD_DIR}/include" LDFLAGS="-L${LIBMD_DIR}/lib" gmake -j$(sysctl -n hw.ncpu) 2>&1
           
@@ -62,7 +59,6 @@ workflows:
           
           if [ -f trustcache ] && [ -x trustcache ]; then
             echo "✅ trustcache 编译成功"
-            # 确保 trustcache 在 PATH 中
             cp -f trustcache "$CM_BUILD_DIR/" 2>/dev/null || true
             export PATH="$TRUSTCACHE_DIR:$PATH"
             echo "trustcache 路径: $(which trustcache)"
@@ -82,7 +78,7 @@ workflows:
           fi
           export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
 
-      - name: 04 - 应用Xcode 26+兼容性补丁 + 统一 pmap_cs 偏移
+      - name: 04 - 应用Xcode 26+兼容性补丁 + 偏移校准 + 剥离jbctl启动
         script: |
           set -x
           echo "开始应用补丁..."
@@ -115,7 +111,7 @@ workflows:
           fi
           echo "兼容性补丁应用完成。"
 
-          # === 新增：统一 pmap_cs 偏移为 0x88（兼容 M1/A15） ===
+          # === 统一 pmap_cs 偏移为 0x88 ===
           echo "=== 统一 pmap_cs 偏移为 0x88 ==="
           OFFSET_FILES=$(find "$CM_BUILD_DIR" -type f \( -name "*.h" -o -name "*.c" -o -name "*.inc" \) \
             -not -path "*/.git/*" -not -path "*/theos/*" \
@@ -126,6 +122,22 @@ workflows:
           done
           echo "偏移校准完成。"
 
+          # === 剥离 jbctl 启动：在 launchdhook 中注释掉 jbctl 调用，改为直接返回 ===
+          echo "=== 剥离 jbctl 启动（仅测试用） ==="
+          find "$CM_BUILD_DIR/BaseBin/launchdhook" -type f \( -name "*.c" -o -name "*.m" -o -name "*.mm" -o -name "*.x" \) \
+            2>/dev/null | while read f; do
+              if grep -q 'jbctl' "$f"; then
+                echo "  修改 $f"
+                # 将包含 jbctl 的行注释掉，并在其后插入 return 0;
+                sed -i '' '/jbctl/{
+                  s/^/\/\/ /
+                  a\
+                  return 0;
+                }' "$f"
+              fi
+            done
+          echo "jbctl 剥离完成。"
+
       - name: 05 - 构建BaseBin
         script: |
           set -x
@@ -134,7 +146,6 @@ workflows:
           export SYSROOT="$SDK"
           export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
           
-          # 确保 trustcache 在 PATH 中
           TRUSTCACHE_DIR="/Users/builder/clone/trustcache"
           if [ -f "$TRUSTCACHE_DIR/trustcache" ]; then
             export PATH="$TRUSTCACHE_DIR:$PATH"
@@ -147,7 +158,6 @@ workflows:
           cd "$CM_BUILD_DIR/BaseBin"
           echo "=== 开始构建 BaseBin ==="
 
-          # 全量构建
           make FINALPACKAGE=1 \
             THEOS="$THEOS" \
             THEOS_IPHONEOS_SDK="$SDK" \
@@ -155,7 +165,6 @@ workflows:
             SYSROOT="$SDK" \
             -k 2>&1 || true
 
-          # 修复子项目 cp 路径
           fix_subproject() {
             local SUB_DIR="$1" SUB_NAME="$2"
             local FULL="$CM_BUILD_DIR/BaseBin/$SUB_DIR"
@@ -185,7 +194,6 @@ workflows:
           
           echo "子项目产物修复完成。"
 
-          # 生成 basebin.tar
           echo "生成 basebin.tar..."
           make basebin.tar FINALPACKAGE=1 \
             THEOS="$THEOS" \
@@ -205,7 +213,6 @@ workflows:
             fi
           fi
 
-          # 生成 basebin.tc
           echo "生成 basebin.tc..."
           make basebin.tc FINALPACKAGE=1 \
             THEOS="$THEOS" \
@@ -225,7 +232,6 @@ workflows:
             fi
           fi
 
-          # 验证产物
           echo "=== 最终验证 ==="
           ls -lh "$CM_BUILD_DIR/BaseBin/basebin.tar" "$CM_BUILD_DIR/BaseBin/basebin.tc"
           if [ ! -s "$CM_BUILD_DIR/BaseBin/basebin.tc" ]; then
@@ -255,7 +261,6 @@ workflows:
       - name: 08 - 编译Dopamine应用（PUAF Pages=512）
         script: |
           set -x
-          # 智能查找 Dopamine 的 Xcode 项目
           PROJECT_FILE=""
           for NAME in "Dopamine" "dopamine"; do
             CANDIDATE=$(find "$CM_BUILD_DIR/Application" -maxdepth 3 -name "${NAME}.xcodeproj" -o -name "${NAME}.xcworkspace" 2>/dev/null | head -1)
