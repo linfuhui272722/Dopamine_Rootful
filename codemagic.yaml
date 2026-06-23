@@ -190,31 +190,7 @@ workflows:
 
           if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tc" ]; then
             echo "make basebin.tc 失败，使用 Python 生成..."
-            python3 -c "
-import os, struct, hashlib
-build_dir = '/Users/builder/clone/BaseBin/.build'
-output_path = '/Users/builder/clone/BaseBin/basebin.tc'
-entries = []
-for root, dirs, files in os.walk(build_dir):
-    for f in sorted(files):
-        filepath = os.path.join(root, f)
-        relpath = os.path.relpath(filepath, build_dir)
-        with open(filepath, 'rb') as fp:
-            data = fp.read()
-        sha1 = hashlib.sha1(data).digest()
-        path_bytes = relpath.encode('utf-8')
-        entries.append((sha1, path_bytes))
-entries.sort(key=lambda e: e[1])
-count = len(entries)
-header = struct.pack('<II', 1, count)
-with open(output_path, 'wb') as f:
-    f.write(header)
-    for sha1, path_bytes in entries:
-        f.write(sha1)
-        f.write(struct.pack('<I', len(path_bytes)))
-        f.write(path_bytes)
-print(f'Generated basebin.tc with {count} entries')
-"
+            python3 -c "import os, struct, hashlib; build_dir='/Users/builder/clone/BaseBin/.build'; output_path='/Users/builder/clone/BaseBin/basebin.tc'; entries=[]; [entries.append((hashlib.sha1(open(os.path.join(r,f),'rb').read()).digest(), os.path.relpath(os.path.join(r,f), build_dir).encode())) for r,d,fs in os.walk(build_dir) for f in sorted(fs)]; entries.sort(key=lambda e:e[1]); header=struct.pack('<II',1,len(entries)); open(output_path,'wb').write(header); [open(output_path,'ab').write(e[0]+struct.pack('<I',len(e[1]))+e[1]) for e in entries]; print(f'Generated basebin.tc with {len(entries)} entries')"
           fi
 
           # —— 6. 验证 ——
