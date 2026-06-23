@@ -174,13 +174,6 @@ workflows:
           
           echo "子项目产物修复完成。"
 
-          # --- 打补丁限制 dmaFail 扫描范围，解决 M1 15.5 APFS 紫屏 ---
-          echo "正在修改 Makefile 以防止 dmaFail 破坏 APFS 结构..."
-          cd "$CM_BUILD_DIR/BaseBin"
-          # 在 Makefile 的第一行插入三个宏定义
-          sed -i '' '1s/^/CFLAGS += -DCONFINE_PHYSMEM_SCAN=1\nCFLAGS += -DDISABLE_JOP=1\nCFLAGS += -DPA_PATCH_UNIT=0x1000\n/' Makefile
-          # ---------------------------------------------------------
-
           # 生成 basebin.tar
           echo "生成 basebin.tar..."
           make basebin.tar FINALPACKAGE=1 \
@@ -255,7 +248,7 @@ workflows:
             make
           fi
 
-      - name: 08 - 编译Dopamine应用
+      - name: 08 - 编译Dopamine应用（固定KFD PUAF Pages = 1024）
         script: |
           set -x
           # 智能查找 Dopamine 的 Xcode 项目
@@ -294,7 +287,8 @@ workflows:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            DEVELOPMENT_TEAM=""
+            DEVELOPMENT_TEAM="" \
+            GCC_PREPROCESSOR_DEFINITIONS='$(inherited) NUM_PUAF_PAGES=1024'
 
       - name: 09 - 打包为IPA
         script: |
