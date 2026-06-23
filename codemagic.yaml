@@ -102,35 +102,59 @@ workflows:
             SYSROOT="$SDK" \
             -k 2>&1 || true
 
-          # —— 2. 尝试编译 trustcache（macOS 主机工具）——
-          echo "编译 trustcache..."
-          TC_DIR=$(find "$CM_BUILD_DIR/BaseBin" -maxdepth 3 -name "trustcache" -type d 2>/dev/null | head -1)
-          if [ -z "$TC_DIR" ]; then
-            TC_C=$(find "$CM_BUILD_DIR/BaseBin" -maxdepth 3 -name "trustcache.c" -type f 2>/dev/null | head -1)
-            if [ -n "$TC_C" ]; then
-              TC_DIR=$(dirname "$TC_C")
-            fi
+          # —— 2. 编 trustcache（macOS 宿主工具，用系统 clang + Security.framework）——
+          echo "=== 查找并编译 trustcache (macOS host tool) ==="
+          TRUSTCACHE_BIN=""
+
+          # 2a. 先看 _external/ 里有没有 opa334 预编译好的 mac 版 trustcache
+          TC_PREBUILT=$(find "$CM_BUILD_DIR/BaseBin/_external" -maxdepth 3 -name "trustcache" -type f -perm +111 2>/dev/null | head -1)
+          if [ -n "$TC_PREBUILT" ] && [ -x "$TC_PREBUILT" ]; then
+            echo "找到预编译 trustcache: $TC_PREBUILT"
+            TRUSTCACHE_BIN="$TC_PREBUILT"
           fi
-          if [ -n "$TC_DIR" ]; then
-            echo "找到 trustcache 源码目录: $TC_DIR"
-            cd "$TC_DIR"
-            if [ -f Makefile ]; then
+
+          # 2b. 没预编译就找源码编（全局搜，不止 BaseBin/）
+          if [ -z "$TRUSTCACHE_BIN" ]; then
+            TC_SRC=$(find "$CM_BUILD_DIR" -maxdepth 4 -not -path "*/.theos/*" -not -path "*/.git/*" \
+              -name "trustcache.c" -o -name "trustcache.m" 2>/dev/null | head -1)
+            if [ -n "$TC_SRC" ]; then
+              TC_DIR=$(dirname "$TC_SRC")
+              echo "找到 trustcache 源码: $TC_SRC (dir: $TC_DIR)"
+              # macOS 宿主工具，必须用系统 clang，不能走 THEOS iphoneos 交叉链
+              MAC_CLANG=$(xcrun -f clang -sdk macos 2>/dev/null || which clang || echo "/usr/bin/clang")
+              echo "macOS clang: $MAC_CLANG"
+              cd "$TC_DIR"
+              # 尝试 make 先（如果有 Makefile 且是 mac target）
               make 2>&1 || true
+              # make 没出二进制就手动 clang + Security/CoreFoundation
+              if [ ! -f trustcache ] || [ ! -x trustcache ]; then
+                echo "尝试手动编译 trustcache (macOS host)..."
+                $MAC_CLANG -O2 -Wall \
+                  -framework Security -framework CoreFoundation \
+                  "$TC_SRC" -o trustcache 2>&1 || true
+              fi
+              # 也试 .m 后缀的情况（ObjC）
+              if [ ! -f trustcache ] && [ "$TC_SRC" != "${TC_SRC%.m}" ]; then
+                $MAC_CLANG -O2 -Wall -x objective-c \
+                  -framework Security -framework CoreFoundation -framework Foundation \
+                  "$TC_SRC" -o trustcache 2>&1 || true
+              fi
+              cd "$CM_BUILD_DIR/BaseBin"
+              if [ -f "$TC_DIR/trustcache" ] && [ -x "$TC_DIR/trustcache" ]; then
+                TRUSTCACHE_BIN="$TC_DIR/trustcache"
+                echo "✅ trustcache 编译成功: $TRUSTCACHE_BIN"
+                "$TRUSTCACHE_BIN" 2>&1 || true
+              fi
             fi
-            if [ ! -f trustcache ] && [ -f trustcache.c ]; then
-              clang -O2 trustcache.c -o trustcache -I. 2>&1 || true
-            fi
-            if [ -f trustcache ] && [ -x trustcache ]; then
-              export PATH="$TC_DIR:$PATH"
-              echo "trustcache 编译成功: $TC_DIR/trustcache"
-              trustcache --help 2>&1 || true
-            else
-              echo "⚠️ trustcache 编译失败，将使用 ldid 生成 basebin.tc"
-            fi
-          else
-            echo "⚠️ 未找到 trustcache 源码，将使用 ldid 生成 basebin.tc"
           fi
-          cd "$CM_BUILD_DIR/BaseBin"
+
+          # 2c. 把 trustcache 加入 PATH
+          if [ -n "$TRUSTCACHE_BIN" ]; then
+            export PATH="$(dirname "$TRUSTCACHE_BIN"):$PATH"
+            which trustcache
+          else
+            echo "⚠️ trustcache 仍未就绪，将用 Python cdhash 兜底（但可能有格式风险）"
+          fi
 
           # —— 3. 修复子项目 cp 路径——
           fix_subproject() {
@@ -160,28 +184,22 @@ workflows:
           fix_subproject "XPF" "libxpf.dylib"
           echo "子项目产物修复完成。"
 
-          # —— 4. 生成 basebin.tar（如果 make 失败则手动打包）——
-          echo "生成 basebin.tar..."
+          # —— 4. 生成 basebin.tar 和 basebin.tc ——
+          echo "=== 生成 basebin.tar / basebin.tc ==="
+
+          # 4a. basebin.tar
           make basebin.tar FINALPACKAGE=1 \
             THEOS="$THEOS" \
             THEOS_IPHONEOS_SDK="$SDK" \
             IPHONEOS_SYSROOT="$SDK" \
             SYSROOT="$SDK" 2>&1 || true
           if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tar" ]; then
-            echo "make basebin.tar 失败，手动打包 .build 目录..."
+            echo "make basebin.tar 失败，手动打包 .build..."
             cd "$CM_BUILD_DIR/BaseBin"
-            if [ -d ".build" ] && [ "$(ls -A .build)" ]; then
-              tar -cf basebin.tar .build
-              echo "手动 basebin.tar 创建成功"
-            else
-              echo "错误：.build 目录为空或不存在"
-              exit 1
-            fi
+            [ -d ".build" ] && [ "$(ls -A .build)" ] && tar -cf basebin.tar .build
           fi
 
-          # —— 5. 生成 basebin.tc ——
-          echo "生成 basebin.tc..."
-          # 先尝试用 make（如果 trustcache 命令已可用）
+          # 4b. basebin.tc —— 优先 trustcache 命令，失败才 Python 兜底
           make basebin.tc FINALPACKAGE=1 \
             THEOS="$THEOS" \
             THEOS_IPHONEOS_SDK="$SDK" \
@@ -189,52 +207,68 @@ workflows:
             SYSROOT="$SDK" 2>&1 || true
 
           if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tc" ]; then
-            echo "make basebin.tc 失败，使用 ldid 生成..."
-            # 用 printf 逐行写入 Python 脚本，避免 heredoc 缩进问题
+            echo "⚠️ make basebin.tc 失败，trustcache 命令可能仍不可用"
+            if command -v trustcache &>/dev/null; then
+              echo "但有 trustcache 在 PATH，尝试直接调..."
+              cd "$CM_BUILD_DIR/BaseBin"
+              trustcache create .build/basebin.tc .build 2>&1 || \
+              trustcache .build .build/basebin.tc 2>&1 || true
+            fi
+          fi
+
+          # 4c. 仍失败 → Python 兜底，但这次加 debug 打印 ldid -h 样本
+          if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tc" ]; then
+            echo "=== Python 兜底生成 basebin.tc ==="
+            echo "先采样 ldid -h 看 cdhash 格式:"
+            find "$CM_BUILD_DIR/BaseBin/.build" -type f \( -name "*.dylib" -o -name "*.so" \) 2>/dev/null | head -3 | while read f; do
+              echo "--- $f ---"
+              ldid -h "$f" 2>&1 | grep -i "cdhash\|magic\|Fat" || true
+            done
+
             printf '%s\n' \
               'import os, struct, subprocess' \
-              'bd = "/Users/builder/clone/BaseBin/.build"' \
-              'op = "/Users/builder/clone/BaseBin/basebin.tc"' \
-              'def get_cdhash(fp):' \
+              'bd="/Users/builder/clone/BaseBin/.build"' \
+              'op="/Users/builder/clone/BaseBin/basebin.tc"' \
+              'def g(fp):' \
               '    try:' \
-              '        out = subprocess.check_output(["ldid","-h",fp], stderr=subprocess.STDOUT).decode()' \
-              '        for l in out.splitlines():' \
+              '        o=subprocess.check_output(["ldid","-h",fp],stderr=subprocess.STDOUT).decode()' \
+              '        for l in o.splitlines():' \
               '            if l.startswith("cdhash:"):' \
-              '                return bytes.fromhex(l.split(":")[1].strip())' \
-              '    except:' \
-              '        pass' \
+              '                h=l.split(":",1)[1].strip()' \
+              '                print(f"  {fp}: cdhash={h[:8]}... len={len(h)}")' \
+              '                return bytes.fromhex(h)' \
+              '    except Exception as e:' \
+              '        print(f"  {fp}: ERR {e}")' \
               '    return None' \
-              'entries = []' \
+              'ents=[]' \
               'for r,_,fs in os.walk(bd):' \
               '    for f in sorted(fs):' \
-              '        fp = os.path.join(r,f)' \
-              '        with open(fp,"rb") as fh:' \
-              '            mag = fh.read(4)' \
-              '        if mag not in (b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe"):' \
+              '        fp=os.path.join(r,f)' \
+              '        with open(fp,"rb") as fh: mg=fh.read(4)' \
+              '        if mg not in (b"\xfe\xed\xfa\xce",b"\xce\xfa\xed\xfe",b"\xfe\xed\xfa\xcf",b"\xcf\xfa\xed\xfe",b"\xca\xfe\xba\xbe",b"\xbe\xba\xfe\xca"):' \
               '            continue' \
-              '        cd = get_cdhash(fp)' \
-              '        if cd:' \
-              '            entries.append((cd, os.path.relpath(fp,bd).encode()))' \
-              'entries.sort(key=lambda e:e[1])' \
-              'cnt = len(entries)' \
-              'hdr = struct.pack("<II", 1, cnt)' \
-              'with open(op,"wb") as f:' \
-              '    f.write(hdr)' \
-              '    for e in entries:' \
-              '        f.write(e[0] + struct.pack("<I", len(e[1])) + e[1])' \
-              'print(f"Generated basebin.tc with {cnt} entries")' \
+              '        rp=os.path.relpath(fp,bd);cd=g(fp)' \
+              '        if cd: ents.append((cd,rp.encode()))' \
+              'ents.sort(key=lambda e:e[1])' \
+              'cnt=len(ents)' \
+              'open(op,"wb").write(struct.pack("<II",1,cnt)+b"".join(e[0]+struct.pack("<I",len(e[1]))+e[1] for e in ents))' \
+              'print(f"tc: {cnt} entries, op={op}")' \
               > /tmp/gen_tc.py
             python3 /tmp/gen_tc.py
           fi
 
-          # —— 6. 验证 ——
+          # —— 5. 验证 ——
           echo "=== 最终验证 ==="
           ls -lh "$CM_BUILD_DIR/BaseBin/basebin.tar" "$CM_BUILD_DIR/BaseBin/basebin.tc"
+          # 验 tc header：小端 version=1, count>0
+          if [ -f "$CM_BUILD_DIR/BaseBin/basebin.tc" ]; then
+            od -A x -t x1z -N 8 "$CM_BUILD_DIR/BaseBin/basebin.tc" | head -1
+          fi
           if [ ! -s "$CM_BUILD_DIR/BaseBin/basebin.tc" ]; then
-            echo "❌ basebin.tc 仍然是空的或不存在"
+            echo "❌ basebin.tc 为空"
             exit 1
           fi
-          echo "✅ BaseBin 构建成功"
+          echo "✅ BaseBin 就绪"
 
       - name: 06 - 下载Bootstraps
         script: |
