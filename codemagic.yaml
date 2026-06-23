@@ -7,6 +7,8 @@ workflows:
       xcode: latest
       vars:
         THEOS: "/Users/builder/clone/theos"
+        DOPAMINE_REPO: "https://github.com/opa334/dopamine-rootful.git"
+        DOPAMINE_BRANCH: "rootful"
 
     scripts:
       - name: 01 - 环境与调试信息
@@ -24,19 +26,34 @@ workflows:
           echo "=== iPhoneOS SDK 路径 ==="
           xcrun --show-sdk-path --sdk iphoneos
 
-      - name: 02 - 安装系统依赖 + 编译 trustcache
+      - name: 02 - 克隆 Dopamine 仓库并切换分支
+        script: |
+          set -x
+          if [ ! -d "$CM_BUILD_DIR/Application" ]; then
+            echo "克隆 Dopamine Rootful 仓库..."
+            git clone --depth=1 --branch "$DOPAMINE_BRANCH" "$DOPAMINE_REPO" "$CM_BUILD_DIR"
+          else
+            echo "仓库已存在，更新并切换分支..."
+            cd "$CM_BUILD_DIR"
+            git fetch origin
+            git checkout "$DOPAMINE_BRANCH"
+            git pull
+          fi
+          echo "当前分支: $(git rev-parse --abbrev-ref HEAD)"
+          echo "最近提交: $(git log --oneline -1)"
+
+      - name: 03 - 安装系统依赖 + 编译 trustcache
         script: |
           set -x
           export HOMEBREW_NO_REQUIRE_TAP_TRUST=1
-          brew install ldid xz libarchive dpkg
-          brew install make
-          brew install libmd
+          brew install ldid xz libarchive dpkg make libmd
           export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
           echo "PATH=$PATH" >> $CM_ENV
-          which ldid
-          which dpkg-deb
-          which openssl
-          echo "libmd 版本: $(brew info libmd | head -1)"
+
+          # 设置 libmd 的搜索路径（解决 sha.h 找不到的问题）
+          LIBMD_PREFIX="$(brew --prefix libmd)"
+          export CPATH="${LIBMD_PREFIX}/include:${CPATH}"
+          export LIBRARY_PATH="${LIBMD_PREFIX}/lib:${LIBRARY_PATH}"
 
           echo "=== 编译 trustcache ==="
           TRUSTCACHE_DIR="/Users/builder/clone/trustcache"
@@ -45,34 +62,19 @@ workflows:
           fi
           cd "$TRUSTCACHE_DIR"
           git pull || true
-          
-          # 清除并重新编译 trustcache
-          echo "编译 trustcache..."
           gmake clean || true
-          
-          # 使用默认的 libmd 而不是 OpenSSL
-          LIBMD_DIR="$(brew --prefix libmd)"
-          CFLAGS="-I${LIBMD_DIR}/include" LDFLAGS="-L${LIBMD_DIR}/lib" gmake -j$(sysctl -n hw.ncpu) 2>&1
-          
-          if [ ! -f trustcache ]; then
-            echo "❌ trustcache 编译失败，尝试不带参数编译..."
-            gmake clean
-            gmake
-          fi
-          
-          if [ -f trustcache ] && [ -x trustcache ]; then
-            echo "✅ trustcache 编译成功"
-            # 确保 trustcache 在 PATH 中
-            cp -f trustcache "$CM_BUILD_DIR/" 2>/dev/null || true
-            export PATH="$TRUSTCACHE_DIR:$PATH"
-            echo "trustcache 路径: $(which trustcache)"
-            trustcache --version 2>&1 || true
-          else
-            echo "❌ trustcache 编译失败，看上面日志"
+          gmake -j$(sysctl -n hw.ncpu) 2>&1
+          if [ ! -f trustcache ] || [ ! -x trustcache ]; then
+            echo "❌ trustcache 编译失败"
             exit 1
           fi
+          echo "✅ trustcache 编译成功"
+          # 放入 PATH
+          export PATH="$TRUSTCACHE_DIR:$PATH"
+          echo "trustcache 路径: $(which trustcache)"
+          trustcache --version 2>&1 || true
 
-      - name: 03 - 安装与配置THEOS
+      - name: 04 - 安装与配置THEOS
         script: |
           set -x
           export THEOS="$CM_BUILD_DIR/theos"
@@ -82,7 +84,7 @@ workflows:
           fi
           export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
 
-      - name: 04 - 应用Xcode 26+兼容性补丁
+      - name: 05 - 应用Xcode 26+兼容性补丁
         script: |
           set -x
           echo "开始应用补丁..."
@@ -115,22 +117,15 @@ workflows:
           fi
           echo "兼容性补丁应用完成。"
 
-      - name: 05 - 构建BaseBin
+      - name: 06 - 构建BaseBin
         script: |
           set -x
           source $CM_ENV
           export SDK=$(xcrun --show-sdk-path --sdk iphoneos)
           export SYSROOT="$SDK"
           export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
-          
-          # 确保 trustcache 在 PATH 中
-          TRUSTCACHE_DIR="/Users/builder/clone/trustcache"
-          if [ -f "$TRUSTCACHE_DIR/trustcache" ]; then
-            export PATH="$TRUSTCACHE_DIR:$PATH"
-            echo "trustcache 路径: $(which trustcache)"
-            trustcache --version 2>&1 || true
-          fi
-          
+          # 确保 trustcache 在 PATH
+          export PATH="/Users/builder/clone/trustcache:$PATH"
           export THEOS="$CM_BUILD_DIR/theos"
 
           cd "$CM_BUILD_DIR/BaseBin"
@@ -223,7 +218,7 @@ workflows:
           fi
           echo "✅ BaseBin 就绪"
 
-      - name: 06 - 下载Bootstraps
+      - name: 07 - 下载Bootstraps
         script: |
           set -x
           RES_DIR="$CM_BUILD_DIR/Application/Dopamine/Resources"
@@ -233,7 +228,7 @@ workflows:
             ./download_bootstraps.sh
           fi
 
-      - name: 07 - 构建Packages
+      - name: 08 - 构建Packages
         script: |
           set -x
           if [ -d "$CM_BUILD_DIR/Packages" ]; then
@@ -241,7 +236,19 @@ workflows:
             make
           fi
 
-      - name: 08 - 编译Dopamine应用
+      - name: 09 - 更新偏移量（适配 M1 iPad 15.5）
+        script: |
+          set -x
+          cd "$CM_BUILD_DIR"
+          if [ -f "./scripts/update_offsets.sh" ]; then
+            echo "运行偏移量更新脚本..."
+            chmod +x ./scripts/update_offsets.sh
+            ./scripts/update_offsets.sh
+          else
+            echo "⚠️ 未找到 update_offsets.sh，跳过（可能已内置）"
+          fi
+
+      - name: 10 - 编译Dopamine应用
         script: |
           set -x
           # 智能查找 Dopamine 的 Xcode 项目
@@ -282,7 +289,7 @@ workflows:
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM=""
 
-      - name: 09 - 打包为IPA
+      - name: 11 - 打包为IPA
         script: |
           set -x
           APP_PATH=$(find "$CM_BUILD_DIR/build" -maxdepth 5 -name "Dopamine.app" -type d 2>/dev/null | head -1)
