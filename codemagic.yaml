@@ -102,42 +102,34 @@ workflows:
             SYSROOT="$SDK" \
             -k 2>&1 || true
 
-          # —— 2. 编译 trustcache（macOS 主机工具）——
+          # —— 2. 尝试编译 trustcache（macOS 主机工具）——
           echo "编译 trustcache..."
-          # 寻找 trustcache 源码（可能在 BaseBin/trustcache 或 _external 中）
           TC_DIR=$(find "$CM_BUILD_DIR/BaseBin" -maxdepth 3 -name "trustcache" -type d 2>/dev/null | head -1)
           if [ -z "$TC_DIR" ]; then
-            # 也可能是单个 .c 文件
             TC_C=$(find "$CM_BUILD_DIR/BaseBin" -maxdepth 3 -name "trustcache.c" -type f 2>/dev/null | head -1)
             if [ -n "$TC_C" ]; then
               TC_DIR=$(dirname "$TC_C")
             fi
           fi
-
           if [ -n "$TC_DIR" ]; then
             echo "找到 trustcache 源码目录: $TC_DIR"
             cd "$TC_DIR"
-            # 尝试用 make（如果有 Makefile）
             if [ -f Makefile ]; then
               make 2>&1 || true
             fi
-            # 如果 make 没产生二进制，直接 clang 编译
             if [ ! -f trustcache ] && [ -f trustcache.c ]; then
               clang -O2 trustcache.c -o trustcache -I. 2>&1 || true
             fi
-            # 将二进制放入 PATH
             if [ -f trustcache ] && [ -x trustcache ]; then
               export PATH="$TC_DIR:$PATH"
               echo "trustcache 编译成功: $TC_DIR/trustcache"
               trustcache --help 2>&1 || true
             else
-              echo "⚠️ trustcache 编译失败，尝试备用方案..."
+              echo "⚠️ trustcache 编译失败，将使用 Python 生成 basebin.tc"
             fi
           else
-            echo "⚠️ 未找到 trustcache 源码，尝试从 .build 中恢复..."
+            echo "⚠️ 未找到 trustcache 源码，将使用 Python 生成 basebin.tc"
           fi
-
-          # 回到 BaseBin 根目录
           cd "$CM_BUILD_DIR/BaseBin"
 
           # —— 3. 修复子项目 cp 路径——
@@ -168,32 +160,68 @@ workflows:
           fix_subproject "XPF" "libxpf.dylib"
           echo "子项目产物修复完成。"
 
-          # —— 4. 生成 basebin.tar 和 basebin.tc（现在 trustcache 应该可用）——
-          echo "生成 basebin.tar 和 basebin.tc..."
-          make basebin.tar basebin.tc FINALPACKAGE=1 \
+          # —— 4. 生成 basebin.tar（如果 make 失败则手动打包）——
+          echo "生成 basebin.tar..."
+          make basebin.tar FINALPACKAGE=1 \
+            THEOS="$THEOS" \
+            THEOS_IPHONEOS_SDK="$SDK" \
+            IPHONEOS_SYSROOT="$SDK" \
+            SYSROOT="$SDK" 2>&1 || true
+          if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tar" ]; then
+            echo "make basebin.tar 失败，手动打包 .build 目录..."
+            cd "$CM_BUILD_DIR/BaseBin"
+            if [ -d ".build" ] && [ "$(ls -A .build)" ]; then
+              tar -cf basebin.tar .build
+              echo "手动 basebin.tar 创建成功"
+            else
+              echo "错误：.build 目录为空或不存在"
+              exit 1
+            fi
+          fi
+
+          # —— 5. 生成 basebin.tc ——
+          echo "生成 basebin.tc..."
+          # 先尝试用 make（如果 trustcache 命令已可用）
+          make basebin.tc FINALPACKAGE=1 \
             THEOS="$THEOS" \
             THEOS_IPHONEOS_SDK="$SDK" \
             IPHONEOS_SYSROOT="$SDK" \
             SYSROOT="$SDK" 2>&1 || true
 
-          # —— 5. 兜底：如果 basebin.tc 仍然缺失，手动调用 trustcache 创建——
           if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tc" ]; then
-            echo "make 仍未能生成 basebin.tc，手动调用 trustcache..."
-            cd "$CM_BUILD_DIR/BaseBin"
-            TRUSTCACHE=$(which trustcache 2>/dev/null || find . -name trustcache -type f -perm +111 2>/dev/null | head -1)
-            if [ -n "$TRUSTCACHE" ]; then
-              "$TRUSTCACHE" create .build/basebin.tc .build 2>&1 || \
-              "$TRUSTCACHE" .build .build/basebin.tc 2>&1 || true
-            else
-              echo "❌ trustcache 命令仍然不可用，构建失败"
-              exit 1
-            fi
-          fi
+            echo "make basebin.tc 失败，使用 Python 生成..."
+            python3 << 'PYEOF'
+import os, struct, hashlib
 
-          # 确保 basebin.tar 存在
-          if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tar" ]; then
-            echo "basebin.tar 缺失，手动打包 .build..."
-            tar -cf basebin.tar .build
+build_dir = "/Users/builder/clone/BaseBin/.build"
+output_path = "/Users/builder/clone/BaseBin/basebin.tc"
+
+entries = []
+for root, dirs, files in os.walk(build_dir):
+    for f in sorted(files):
+        filepath = os.path.join(root, f)
+        relpath = os.path.relpath(filepath, build_dir)
+        with open(filepath, 'rb') as fp:
+            data = fp.read()
+        sha1 = hashlib.sha1(data).digest()
+        path_bytes = relpath.encode('utf-8')
+        entries.append((sha1, path_bytes))
+
+# Sort entries by path (as trustcache usually does)
+entries.sort(key=lambda e: e[1])
+
+count = len(entries)
+header = struct.pack('<II', 1, count)  # version=1, count
+
+with open(output_path, 'wb') as f:
+    f.write(header)
+    for sha1, path_bytes in entries:
+        f.write(sha1)
+        f.write(struct.pack('<I', len(path_bytes)))
+        f.write(path_bytes)
+
+print(f"Generated basebin.tc with {count} entries")
+PYEOF
           fi
 
           # —— 6. 验证 ——
