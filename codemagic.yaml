@@ -190,50 +190,40 @@ workflows:
 
           if [ ! -f "$CM_BUILD_DIR/BaseBin/basebin.tc" ]; then
             echo "make basebin.tc 失败，使用 ldid 生成..."
-            # 将 Python 脚本写入临时文件以避免 heredoc 缩进问题
-            cat > /tmp/gen_tc.py << 'ENDSCRIPT'
-import os, struct, subprocess
-
-build_dir = '/Users/builder/clone/BaseBin/.build'
-output_path = '/Users/builder/clone/BaseBin/basebin.tc'
-
-def get_cdhash(filepath):
-    try:
-        out = subprocess.check_output(['ldid', '-h', filepath], stderr=subprocess.STDOUT)
-        for line in out.decode().splitlines():
-            if line.startswith('cdhash:'):
-                return bytes.fromhex(line.split(':')[1].strip())
-    except Exception as e:
-        print(f'  Failed to get cdhash for {filepath}: {e}')
-        return None
-
-entries = []
-for root, dirs, files in os.walk(build_dir):
-    for f in sorted(files):
-        filepath = os.path.join(root, f)
-        relpath = os.path.relpath(filepath, build_dir)
-        # 只处理 Mach-O 文件（通过 magic 判断）
-        with open(filepath, 'rb') as fp:
-            magic = fp.read(4)
-        if magic not in (b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe'):
-            continue  # 不是 Mach-O，跳过
-        cdhash = get_cdhash(filepath)
-        if cdhash is None:
-            continue
-        path_bytes = relpath.encode('utf-8')
-        entries.append((cdhash, path_bytes))
-
-entries.sort(key=lambda e: e[1])
-count = len(entries)
-header = struct.pack('<II', 1, count)
-with open(output_path, 'wb') as f:
-    f.write(header)
-    for cdhash, path_bytes in entries:
-        f.write(cdhash)
-        f.write(struct.pack('<I', len(path_bytes)))
-        f.write(path_bytes)
-print(f'Generated basebin.tc with {count} entries')
-ENDSCRIPT
+            # 用 printf 逐行写入 Python 脚本，避免 heredoc 缩进问题
+            printf '%s\n' \
+              'import os, struct, subprocess' \
+              'bd = "/Users/builder/clone/BaseBin/.build"' \
+              'op = "/Users/builder/clone/BaseBin/basebin.tc"' \
+              'def get_cdhash(fp):' \
+              '    try:' \
+              '        out = subprocess.check_output(["ldid","-h",fp], stderr=subprocess.STDOUT).decode()' \
+              '        for l in out.splitlines():' \
+              '            if l.startswith("cdhash:"):' \
+              '                return bytes.fromhex(l.split(":")[1].strip())' \
+              '    except:' \
+              '        pass' \
+              '    return None' \
+              'entries = []' \
+              'for r,_,fs in os.walk(bd):' \
+              '    for f in sorted(fs):' \
+              '        fp = os.path.join(r,f)' \
+              '        with open(fp,"rb") as fh:' \
+              '            mag = fh.read(4)' \
+              '        if mag not in (b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe"):' \
+              '            continue' \
+              '        cd = get_cdhash(fp)' \
+              '        if cd:' \
+              '            entries.append((cd, os.path.relpath(fp,bd).encode()))' \
+              'entries.sort(key=lambda e:e[1])' \
+              'cnt = len(entries)' \
+              'hdr = struct.pack("<II", 1, cnt)' \
+              'with open(op,"wb") as f:' \
+              '    f.write(hdr)' \
+              '    for e in entries:' \
+              '        f.write(e[0] + struct.pack("<I", len(e[1])) + e[1])' \
+              'print(f"Generated basebin.tc with {cnt} entries")' \
+              > /tmp/gen_tc.py
             python3 /tmp/gen_tc.py
           fi
 
