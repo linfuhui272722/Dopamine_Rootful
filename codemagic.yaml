@@ -105,6 +105,8 @@ workflows:
           cd "$CM_BUILD_DIR/BaseBin"
           echo "=== 开始构建 BaseBin ==="
           make FINALPACKAGE=1 THEOS="$THEOS" THEOS_IPHONEOS_SDK="$SDK" IPHONEOS_SYSROOT="$SDK" SYSROOT="$SDK" -k 2>&1 || true
+
+          # 修复子项目 cp 路径
           fix_subproject() {
             local SUB_DIR="$1" SUB_NAME="$2"
             local FULL="$CM_BUILD_DIR/BaseBin/$SUB_DIR"
@@ -130,7 +132,21 @@ workflows:
           fix_subproject "rootlesshooks" "rootlesshooks"
           fix_subproject "libjailbreak" "libjailbreak.dylib"
           fix_subproject "XPF" "libxpf.dylib"
+
+          # 确保 libjailbreak.dylib 存在于 .build 目录（供后续链接）
+          mkdir -p .build
+          LJ_DYLIB=$(find "$CM_BUILD_DIR/BaseBin/libjailbreak" -name "libjailbreak.dylib" -type f 2>/dev/null | head -1)
+          if [ -n "$LJ_DYLIB" ]; then
+            cp -v "$LJ_DYLIB" .build/libjailbreak.dylib
+          else
+            echo "⚠️ 未找到 libjailbreak.dylib，尝试从 .theos/obj 复制..."
+            # 如果 fix_subproject 已经复制过，可能就在 .theos/obj/debug 或 release 下
+            cp -v "$CM_BUILD_DIR/BaseBin/libjailbreak/.theos/obj/debug/libjailbreak.dylib" .build/ 2>/dev/null || \
+            cp -v "$CM_BUILD_DIR/BaseBin/libjailbreak/.theos/obj/release/libjailbreak.dylib" .build/ 2>/dev/null || true
+          fi
           echo "子项目产物修复完成。"
+
+          # 生成 basebin.tar
           make basebin.tar FINALPACKAGE=1 THEOS="$THEOS" THEOS_IPHONEOS_SDK="$SDK" IPHONEOS_SYSROOT="$SDK" SYSROOT="$SDK" 2>&1 || true
           [ -f basebin.tar ] || { tar -cf basebin.tar .build; }
           echo "生成 basebin.tc..."
@@ -146,7 +162,7 @@ workflows:
           RES="$CM_BUILD_DIR/Application/Dopamine/Resources"
           [ -f "$RES/download_bootstraps.sh" ] && { cd "$RES"; bash download_bootstraps.sh; }
 
-      - name: 07 - 构建Packages（修复链接器找不到 libjailbreak）
+      - name: 07 - 构建Packages
         script: |
           set -x
           if [ -d "$CM_BUILD_DIR/Packages" ]; then
@@ -162,15 +178,11 @@ workflows:
               cp "$HEADER_SRC"/*.h "$ABS_INCLUDE/libjailbreak/" 2>/dev/null || true
             fi
             
-            # 找到 libjailbreak.dylib 的实际位置
-            LIBAILBREAK_DYLIB=$(find "$CM_BUILD_DIR/BaseBin/libjailbreak" -name "libjailbreak.dylib" -type f 2>/dev/null | head -1)
-            if [ -z "$LIBAILBREAK_DYLIB" ]; then
-              echo "❌ 未找到 libjailbreak.dylib"
+            # 检查 .build 目录中是否有 libjailbreak.dylib
+            if [ ! -f "$ABS_BUILD/libjailbreak.dylib" ]; then
+              echo "❌ .build 目录中缺少 libjailbreak.dylib"
               exit 1
             fi
-            echo "找到 libjailbreak.dylib: $LIBAILBREAK_DYLIB"
-            # 复制到 .build 目录，以便链接器能找到
-            cp "$LIBAILBREAK_DYLIB" "$ABS_BUILD/libjailbreak.dylib"
             
             # 修改 Makefile 中的 -I 和 -L 为绝对路径
             MAKEFILE="$CM_BUILD_DIR/Packages/libkrw-provider/Makefile"
